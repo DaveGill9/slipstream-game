@@ -1,5 +1,28 @@
 import Matter from "matter-js";
-import { angleDiff, defaultTrack, type Track } from "./track";
+import { angleDiff, defaultTrack, PAD, type Track } from "./track";
+/**
+ * Boosts. Driving over a pad gives `pad` seconds of boost. Holding a slide
+ * (Space + steering, at speed, on the road) charges a drift boost: release
+ * after `driftLevels[0]` seconds for a small kick, or after
+ * `driftLevels[1]` for a bigger one.
+ */
+export const BOOST = {
+  pad: 1,
+  driftLevels: [0.8, 1.6],
+  driftBoost: [0.45, 0.85],
+  /** Extra push while boosting, as a multiple of normal acceleration.
+   * 1 takes a kart from 80 to about 100 km/h on a straight. */
+  force: 1,
+  /** Boosting can take a kart this far past its normal top speed. */
+  speedCap: 1.3,
+};
+/** 0 = no charge yet, 1 = small boost ready, 2 = big boost ready. */
+export const driftLevel = (k: { driftCharge: number }) =>
+  k.driftCharge >= BOOST.driftLevels[1]
+    ? 2
+    : k.driftCharge >= BOOST.driftLevels[0]
+      ? 1
+      : 0;
 /** Default race distance; online hosts can pick 1 to MAX_LAPS. */
 export const LAPS = 6;
 export const MAX_LAPS = 10;
@@ -43,6 +66,10 @@ export class Kart {
   resetCount = 0;
   respawnGrace = 0;
   draft = 0;
+  /** Seconds of boost left. */
+  boost = 0;
+  /** Seconds the current slide has been charging a drift boost. */
+  driftCharge = 0;
   /** Centreline segment the kart is on; keeps it on its own stretch of
    * road where the track crosses itself. */
   segment = 0;
@@ -137,6 +164,8 @@ export class Simulation {
       q = atDistance(n.progress - 85);
     k.resetRemaining = 1.5;
     k.draft = 0;
+    k.boost = 0;
+    k.driftCharge = 0;
     k.resetCount++;
     // A held kart is ghosted so traffic cannot move it or become blocked by it.
     Matter.Body.setStatic(k.body, true);
@@ -161,7 +190,12 @@ export class Simulation {
       angleDiff(Math.atan2(far.y - look.y, far.x - look.x), desired),
     );
     const err = angleDiff(desired, b.angle);
-    const target = tuning.topSpeed * 0.86 - bend * 1.6 - (k.id % 3) * 0.1;
+    // A boosted bot rides the boost out instead of braking against it.
+    const target =
+      tuning.topSpeed * 0.86 -
+      bend * 1.6 -
+      (k.id % 3) * 0.1 +
+      (k.boost > 0 ? 1.5 : 0);
     return {
       throttle: speed > target ? -0.25 : 1,
       steer: Math.max(-1, Math.min(1, err * 2.1)),
@@ -264,11 +298,41 @@ export class Simulation {
         k.input.throttle > 0
           ? Math.max(0, 1 - (Math.max(0, forward) / tuning.topSpeed) ** 4)
           : 1;
-      const boost = k.input.throttle > 0 ? 1 + 0.2 * k.draft : 1;
+      const slipstream = k.input.throttle > 0 ? 1 + 0.2 * k.draft : 1;
       Matter.Body.applyForce(b, b.position, {
-        x: f.x * accel * k.input.throttle * power * boost,
-        y: f.y * accel * k.input.throttle * power * boost,
+        x: f.x * accel * k.input.throttle * power * slipstream,
+        y: f.y * accel * k.input.throttle * power * slipstream,
       });
+      // Boost pads: a kart touching a pad gets a full pad boost.
+      for (const pad of this.track.pads) {
+        const dx = b.position.x - pad.x,
+          dy = b.position.y - pad.y;
+        const along = dx * Math.cos(pad.angle) + dy * Math.sin(pad.angle),
+          across = -dx * Math.sin(pad.angle) + dy * Math.cos(pad.angle);
+        if (
+          Math.abs(along) < PAD.length / 2 + 6 &&
+          Math.abs(across) < PAD.width / 2 + 6
+        )
+          k.boost = Math.max(k.boost, BOOST.pad);
+      }
+      // Drift boost: charge while sliding through a turn, spend on release.
+      if (k.input.drift && !off && forward > 3) {
+        if (k.input.steer !== 0) k.driftCharge += 1 / 60;
+      } else {
+        const level = driftLevel(k);
+        if (!k.input.drift && level > 0)
+          k.boost = Math.max(k.boost, BOOST.driftBoost[level - 1]);
+        k.driftCharge = 0;
+      }
+      if (k.boost > 0) {
+        k.boost = Math.max(0, k.boost - 1 / 60);
+        const cap = tuning.topSpeed * BOOST.speedCap;
+        const push =
+          tuning.acceleration *
+          BOOST.force *
+          Math.max(0, 1 - (Math.max(0, forward) / cap) ** 4);
+        Matter.Body.applyForce(b, b.position, { x: f.x * push, y: f.y * push });
+      }
       // Let a kart turn away from a wall under throttle without changing
       // normal moving steering or allowing free rotation at a standstill.
       const wallRecovery =

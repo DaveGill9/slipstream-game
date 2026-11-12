@@ -13,7 +13,12 @@ export interface TrackData {
   start: Point;
   grandstands: { x: number; y: number; width: number; height: number }[];
   sign?: Point;
+  /** Boost pads: `at` is the distance after the start line, `offset` how far
+   * right (+) or left (-) of the centreline the pad sits. */
+  pads?: { at: number; offset: number }[];
 }
+/** Boost pad size: length along the road and width across it. */
+export const PAD = { length: 44, width: 40 };
 export const angleDiff = (a: number, b: number) =>
   Math.atan2(Math.sin(a - b), Math.cos(a - b));
 // Where one stretch of road passes over another, each stretch is a layer for
@@ -179,6 +184,18 @@ export function buildTrack(data: TrackData) {
       if (gap(bridge.under) < BRIDGE_REACH) layer[i] = LAYER.under;
       if (gap(bridge.over) < BRIDGE_REACH) layer[i] = LAYER.over;
     }
+  const pads = (data.pads ?? []).map(({ at, offset: side }) => {
+    const s = startDistance + at,
+      a = atDistance(s - 6),
+      b = atDistance(s + 6),
+      angle = Math.atan2(b.y - a.y, b.x - a.x),
+      c = atDistance(s);
+    return {
+      x: c.x - Math.sin(angle) * side,
+      y: c.y + Math.cos(angle) * side,
+      angle,
+    };
+  });
   return {
     id: data.id,
     name: data.name,
@@ -198,6 +215,7 @@ export function buildTrack(data: TrackData) {
     wallVertices,
     grandstands: data.grandstands,
     sign: data.sign,
+    pads,
     /** Bridge layer of each centreline segment (see LAYER). */
     layer,
     bridge,
@@ -226,6 +244,11 @@ function fromTiled(id: string, name: string, map: typeof foundryMap) {
     start: { x: start.x, y: start.y },
     grandstands: objects("Grandstands"),
     sign: { x: 780, y: 1195 },
+    pads: [
+      { at: 260, offset: -32 },
+      { at: 3790, offset: 30 },
+      { at: 7720, offset: 34 },
+    ],
   });
 }
 export const tracks: Record<string, Track> = {

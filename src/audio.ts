@@ -197,6 +197,35 @@ export class GameAudio {
       this.tone(note, i === 5 ? 0.6 : 0.14, { delay: i * 0.12, volume: 0.14 }),
     );
   }
+  /** Whoosh when a boost starts. */
+  boost() {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state !== "running") return;
+    const at = ctx.currentTime;
+    const rush = ctx.createBufferSource(),
+      filter = ctx.createBiquadFilter(),
+      env = ctx.createGain();
+    rush.buffer = this.noise;
+    filter.type = "bandpass";
+    filter.Q.value = 1.4;
+    filter.frequency.setValueAtTime(500, at);
+    filter.frequency.exponentialRampToValueAtTime(2600, at + 0.45);
+    env.gain.setValueAtTime(0.0001, at);
+    env.gain.exponentialRampToValueAtTime(0.45, at + 0.05);
+    env.gain.exponentialRampToValueAtTime(0.0001, at + 0.6);
+    rush.connect(filter).connect(env).connect(this.sfxGain);
+    rush.start(at, Math.random());
+    rush.stop(at + 0.65);
+    this.tone(170, 0.4, { type: "sawtooth", volume: 0.1, slideTo: 520 });
+  }
+  /** A ping each time a drift boost charges up a level. */
+  charge(level: number) {
+    if (level === 1) this.tone(880, 0.12, { type: "triangle", volume: 0.18 });
+    else {
+      this.tone(1175, 0.1, { type: "triangle", volume: 0.18 });
+      this.tone(1568, 0.16, { type: "triangle", volume: 0.18, delay: 0.07 });
+    }
+  }
   reset() {
     this.tone(420, 0.35, { slideTo: 110, type: "sawtooth", volume: 0.12 });
   }

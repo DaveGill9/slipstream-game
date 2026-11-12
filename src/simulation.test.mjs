@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import Matter from "matter-js";
-import { Simulation, tuning, LAPS } from "./simulation.ts";
+import { Simulation, tuning, LAPS, BOOST, driftLevel } from "./simulation.ts";
 import { tracks, LAYER } from "./track.ts";
 const {
   atDistance,
@@ -260,5 +260,72 @@ test("a stopped kart can steer off a wall under throttle without stationary free
   Matter.Body.setAngularVelocity(k.body, 0);
   s.step({ ...idle, steer: 1 });
   assert.equal(k.body.angularVelocity, 0);
+  s.destroy();
+});
+test("a boost pad pushes a kart past its normal top speed for about a second", () => {
+  const track = tracks.foundry,
+    s = new Simulation(1, new Set([0]), track),
+    k = s.karts[0],
+    pad = track.pads[0];
+  // Line up 150 px before the first pad at 80 km/h (HUD km/h = speed x 13).
+  const start = {
+    x: pad.x - Math.cos(pad.angle) * 150,
+    y: pad.y - Math.sin(pad.angle) * 150,
+  };
+  Matter.Body.setPosition(k.body, start);
+  Matter.Body.setAngle(k.body, pad.angle);
+  Matter.Body.setVelocity(k.body, {
+    x: Math.cos(pad.angle) * (80 / 13),
+    y: Math.sin(pad.angle) * (80 / 13),
+  });
+  s.locate(k);
+  let peak = 0,
+    boosted = 0;
+  for (let i = 0; i < 90; i++) {
+    s.step({ ...idle, throttle: 1 });
+    peak = Math.max(peak, k.body.speed);
+    if (k.boost > 0) boosted++;
+  }
+  assert.ok(boosted >= 55 && boosted <= 70, `boosted for ${boosted} steps`);
+  assert.ok(peak * 13 > 92, `peak ${peak * 13} km/h`);
+  assert.ok(peak <= tuning.topSpeed * BOOST.speedCap);
+  s.destroy();
+});
+test("holding a slide charges a drift boost that fires on release", () => {
+  const s = new Simulation(1),
+    k = s.karts[0];
+  Matter.Composite.remove(
+    s.engine.world,
+    s.engine.world.bodies.filter((b) => b !== k.body),
+  );
+  // Slide in place on the straight so the kart never leaves the road.
+  const slide = (steps, input) => {
+    for (let i = 0; i < steps; i++) {
+      Matter.Body.setPosition(k.body, { x: 1500, y: 1330 });
+      if (k.body.speed < 6)
+        Matter.Body.setVelocity(k.body, {
+          x: Math.cos(k.body.angle) * 6,
+          y: Math.sin(k.body.angle) * 6,
+        });
+      s.step(input);
+    }
+  };
+  const drifting = { throttle: 1, steer: 1, drift: true },
+    release = { throttle: 1, steer: 0, drift: false };
+  // A short slide earns nothing.
+  slide(30, drifting);
+  assert.equal(driftLevel(k), 0);
+  slide(1, release);
+  assert.equal(k.boost, 0);
+  // A long slide reaches level 2 and releases the big boost.
+  slide(100, drifting);
+  assert.equal(driftLevel(k), 2);
+  slide(1, release);
+  assert.equal(k.driftCharge, 0);
+  assert.ok(k.boost > BOOST.driftBoost[1] - 0.05);
+  // Straight-line drifting with no steering does not charge.
+  slide(60, release);
+  slide(100, { throttle: 1, steer: 0, drift: true });
+  assert.equal(k.driftCharge, 0);
   s.destroy();
 });

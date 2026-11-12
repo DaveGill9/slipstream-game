@@ -256,6 +256,8 @@ export class Room {
           resetRemaining: k.resetRemaining,
           respawnGrace: k.respawnGrace,
           draft: k.draft,
+          boost: round(k.boost, 1000),
+          driftCharge: round(k.driftCharge, 1000),
           segment: k.segment,
           input: k.input,
         })) || [],

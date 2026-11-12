@@ -25,8 +25,39 @@ document.addEventListener("click", (event) => {
   if ((event.target as Element).closest?.(".room-board button")) audio.click();
 });
 import { readRecords, improveRecord, recordKey, formatTime } from "./records";
-import { Simulation, tuning, LAPS, type Input } from "./simulation";
-import { tracks, trackIds, defaultTrack, LAYER, type Track } from "./track";
+import {
+  Simulation,
+  tuning,
+  LAPS,
+  driftLevel,
+  type Input,
+  type Kart,
+} from "./simulation";
+import {
+  tracks,
+  trackIds,
+  defaultTrack,
+  LAYER,
+  PAD,
+  type Track,
+} from "./track";
+type Pad = Track["pads"][number];
+/** One painted chevron on a boost pad, `along` px from the pad's centre. */
+function chevron(pad: Pad, along: number) {
+  const c = Math.cos(pad.angle),
+    s = Math.sin(pad.angle);
+  return [
+    [along - 6, -15],
+    [along + 1, -15],
+    [along + 10, 0],
+    [along + 1, 15],
+    [along - 6, 15],
+    [along + 3, 0],
+  ].map(([x, y]) => ({ x: pad.x + x * c - y * s, y: pad.y + x * s + y * c }));
+}
+const CHEVRONS = [-13, -1, 11];
+// Drift spark colours by charge: warming up, small boost, big boost.
+const SPARKS = [0xeef2e6, 0x6cc6ff, 0xffa24a];
 const soloTrackKey = "slipstream-track";
 const colors = [
   0xffd35a, 0x70bfff, 0xe97262, 0x91c876, 0xb38cde, 0xe7eee2, 0xec91b4,
@@ -89,6 +120,13 @@ class Race extends Phaser.Scene {
   debugOn = false;
   timingText!: Phaser.GameObjects.Text;
   trails!: Phaser.GameObjects.Graphics;
+  /** Animated shine on the boost pads. */
+  padShine!: Phaser.GameObjects.Graphics;
+  /** Boost flames and drift sparks: one layer for the ground (and under
+   * the bridge), one above the bridge deck for karts driving over it. */
+  fx: Phaser.GameObjects.Graphics[] = [];
+  lastBoost = 0;
+  lastDriftLevel = 0;
   records: { lap: number | null; race: number | null } = {
     lap: null,
     race: null,
@@ -120,6 +158,11 @@ class Race extends Phaser.Scene {
     }
     this.effects = this.add.graphics().setDepth(2);
     this.trails = this.add.graphics().setDepth(4);
+    this.padShine = this.add.graphics().setDepth(1.5);
+    this.fx = [
+      this.add.graphics().setDepth(4.5),
+      this.add.graphics().setDepth(7.5),
+    ];
     this.makeKarts();
     this.setTrack(this.soloTrack, true);
     this.sprites = this.sim.karts.map((k) =>
@@ -358,6 +401,39 @@ class Race extends Phaser.Scene {
       c.fillStyle = "#293e35";
       c.fillText(name, sign.x + 14, sign.y + 22);
     }
+    // Boost pads: a dark plate with a yellow rim and three chevrons. The
+    // moving shine is drawn on top each frame (see drawPads).
+    for (const pad of this.track.pads) {
+      c.save();
+      c.translate(pad.x, pad.y);
+      c.rotate(pad.angle);
+      c.fillStyle = "#1f2a2a";
+      c.fillRect(
+        -PAD.length / 2 - 2,
+        -PAD.width / 2 - 2,
+        PAD.length + 4,
+        PAD.width + 4,
+      );
+      c.fillStyle = "#e3c66a";
+      c.fillRect(-PAD.length / 2, -PAD.width / 2, PAD.length, PAD.width);
+      c.fillStyle = "#2c3638";
+      c.fillRect(
+        -PAD.length / 2 + 2,
+        -PAD.width / 2 + 2,
+        PAD.length - 4,
+        PAD.width - 4,
+      );
+      c.restore();
+      for (const along of CHEVRONS) {
+        c.beginPath();
+        chevron(pad, along).forEach((p, i) =>
+          i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y),
+        );
+        c.closePath();
+        c.fillStyle = "#a88f3e";
+        c.fill();
+      }
+    }
     if (bridge) {
       // The bridge's shadow falls on the road underneath. The deck itself
       // is a separate image drawn above the karts that pass below it.
@@ -559,11 +635,14 @@ class Race extends Phaser.Scene {
         ["S / ↓", "BRAKE / REVERSE"],
         ["A D / ← →", "STEER"],
         ["SPACE", "HOLD TO SLIDE, RELEASE TO GRIP"],
+        ["DRIFT BOOST", "SLIDE THROUGH A TURN, LET GO FOR A KICK"],
         ["R", "RESET TO TRACK (1.5s PENALTY)"],
         ["ESC", "PIT MENU"],
         ["F2", "ENGINEERING PANEL (SOLO ONLY)"],
       ])
-      .note("Follow close behind another kart for a slipstream: +20% power.")
+      .note(
+        "Drive over the yellow arrow pads for a one-second boost. Sparks show your drift charge: blue for a small boost, orange for a big one. Follow close behind another kart for a slipstream: +20% power.",
+      )
       .button("BACK", back, { primary: true });
   }
   start() {
@@ -846,6 +925,8 @@ class Race extends Phaser.Scene {
         "resetRemaining",
         "respawnGrace",
         "draft",
+        "boost",
+        "driftCharge",
         "segment",
       ] as const)
         k[key] = remote[key];
@@ -935,6 +1016,84 @@ class Race extends Phaser.Scene {
         p.add(t);
       }
     });
+  }
+  /** A bright chevron sweeps along each pad, pointing the way. */
+  drawPads() {
+    const g = this.padShine.clear();
+    const cam = this.cameras.main.worldView;
+    const step = Math.floor(this.time.now / 110) % (CHEVRONS.length + 1);
+    for (const pad of this.track.pads) {
+      if (!Phaser.Geom.Rectangle.Contains(cam, pad.x, pad.y)) {
+        const grown = Phaser.Geom.Rectangle.Clone(cam);
+        Phaser.Geom.Rectangle.Inflate(grown, 40, 40);
+        if (!Phaser.Geom.Rectangle.Contains(grown, pad.x, pad.y)) continue;
+      }
+      CHEVRONS.forEach((along, i) => {
+        const lit = i === step ? 0.95 : i === step - 1 ? 0.45 : 0;
+        if (!lit) return;
+        g.fillStyle(0xfff2b3, lit).fillPoints(chevron(pad, along), true);
+      });
+    }
+  }
+  /** Boost flames from the exhausts and sparks off the rear tyres. */
+  drawKartFx(k: Kart) {
+    const g = this.fx[this.track.layer[k.segment] === LAYER.over ? 1 : 0];
+    const { x, y } = this.sprites[k.id];
+    const fx = Math.cos(k.body.angle),
+      fy = Math.sin(k.body.angle);
+    const at = (along: number, across: number) => ({
+      x: x + fx * along - fy * across,
+      y: y + fy * along + fx * across,
+    });
+    if (k.boost > 0) {
+      // Flames flicker in length and shrink as the boost runs out.
+      const fade = Math.min(1, k.boost / 0.25);
+      for (const side of [-4, 4]) {
+        const length = (7 + Math.random() * 8) * (0.5 + 0.5 * fade);
+        const root = at(-12, side),
+          tip = at(-12 - length, side),
+          mid = at(-12 - length * 0.55, side);
+        g.lineStyle(4, 0xff6a2b, 0.85).lineBetween(
+          root.x,
+          root.y,
+          tip.x,
+          tip.y,
+        );
+        g.lineStyle(2, 0xffd25e, 1).lineBetween(root.x, root.y, mid.x, mid.y);
+        g.fillStyle(0xfffbe6, 1).fillRect(
+          Math.round(root.x) - 1,
+          Math.round(root.y) - 1,
+          2,
+          2,
+        );
+      }
+    }
+    if (k.input.drift && k.driftCharge > 0.12) {
+      const level = driftLevel(k),
+        size = level === 2 ? 2 : 1;
+      for (const side of [-8, 8]) {
+        const wheel = at(-7, side);
+        if (level > 0)
+          g.fillStyle(SPARKS[level], 0.35).fillRect(
+            Math.round(wheel.x) - 2,
+            Math.round(wheel.y) - 2,
+            4,
+            4,
+          );
+        for (let i = 0; i < 2 + level * 2; i++) {
+          const spark = at(
+            -7 - Math.random() * (6 + level * 4),
+            side + (Math.random() - 0.5) * 7,
+          );
+          g.fillStyle(SPARKS[level], 1).fillRect(
+            Math.round(spark.x),
+            Math.round(spark.y),
+            size,
+            size,
+          );
+        }
+      }
+    }
   }
   update(_time: number, delta: number) {
     if (!this.sim) return;
@@ -1057,6 +1216,8 @@ class Race extends Phaser.Scene {
       b = player.body;
     this.effects.clear();
     this.trails.clear();
+    for (const g of this.fx) g.clear();
+    this.drawPads();
     // Knocks against walls and other karts, heard for our own kart only.
     if (this.listeningTo !== this.sim) {
       this.listeningTo = this.sim;
@@ -1126,8 +1287,9 @@ class Race extends Phaser.Scene {
             const end = start + length / 3;
             this.trails.lineStyle(
               1,
-              k.draft > 0.1 ? 0xf5d982 : 0xd8e5d4,
-              (k.draft > 0.1 ? 0.45 : 0.2) * (1 - segment / 3),
+              k.boost > 0 ? 0xffd36b : k.draft > 0.1 ? 0xf5d982 : 0xd8e5d4,
+              (k.boost > 0 ? 0.7 : k.draft > 0.1 ? 0.45 : 0.2) *
+                (1 - segment / 3),
             );
             this.trails.beginPath();
             this.trails.moveTo(
@@ -1142,6 +1304,7 @@ class Race extends Phaser.Scene {
           }
         }
       }
+      if (this.state === "race" && !k.resetRemaining) this.drawKartFx(k);
       if (this.state === "race" && k.input.drift && speed > 2) {
         this.effects.fillStyle(0x1c2b2b, 0.24);
         for (const side of [-1, 1]) {
@@ -1223,9 +1386,27 @@ class Race extends Phaser.Scene {
     this.timingText.setText(
       `LAP  ${formatTime(player.finish ? player.lapTimes.at(-1)! : this.sim.time - player.lapStartedAt)}\nLAST ${formatTime(player.lapTimes.at(-1) ?? null)}\nPB   ${formatTime(this.records.lap)}${this.tunedSession ? " *" : ""}`,
     );
-    this.speedText.setColor(player.draft > 0.1 ? "#f5d982" : "#edf0da");
+    const level = driftLevel(player);
+    if (this.state === "race") {
+      if (player.boost > this.lastBoost + 0.05) audio.boost();
+      if (level > this.lastDriftLevel) audio.charge(level);
+    }
+    this.lastBoost = player.boost;
+    this.lastDriftLevel = level;
+    const [status, colour] =
+      player.boost > 0
+        ? ["BOOST!", "#ffd36b"]
+        : player.input.drift && player.driftCharge > 0
+          ? [
+              ["DRIFT", "DRIFT  >", "DRIFT  >>"][level],
+              ["#edf0da", "#7cc8ff", "#ffb057"][level],
+            ]
+          : player.draft > 0.1
+            ? ["DRAFT +" + Math.round(player.draft * 20) + "%", "#f5d982"]
+            : ["SLIPSTREAM", "#edf0da"];
+    this.speedText.setColor(colour);
     this.speedText.setText(
-      `${String(Math.round(Math.hypot(b.velocity.x, b.velocity.y) * 13)).padStart(3, "0")} KM/H\n${player.draft > 0.1 ? "DRAFT +" + Math.round(player.draft * 20) + "%" : player.input.drift ? "DRIFT" : "SLIPSTREAM"}`,
+      `${String(Math.round(Math.hypot(b.velocity.x, b.velocity.y) * 13)).padStart(3, "0")} KM/H\n${status}`,
     );
     const { points, WORLD } = this.track;
     // Fit the whole circuit inside the 104 x 64 map window.

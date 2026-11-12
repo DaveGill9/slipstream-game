@@ -19,6 +19,8 @@ export interface NetKart {
   resetRemaining: number;
   respawnGrace: number;
   draft: number;
+  boost: number;
+  driftCharge: number;
   segment: number;
   input: Input;
 }
