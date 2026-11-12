@@ -18,7 +18,9 @@ export interface Input {
 }
 export const tuning = {
   acceleration: 0.00038,
-  topSpeed: 5.8,
+  // Engine taper limit. With on-road drag, 7.95 gives an 80 km/h top speed
+  // on the HUD (5.8 gave about 63 km/h).
+  topSpeed: 7.95,
   braking: 0.0009,
   steering: 0.042,
   grip: 0.2,

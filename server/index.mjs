@@ -34,7 +34,9 @@ export function startServer({
           windowAt = Date.now();
           count = 0;
         }
-        if (++count > 100) {
+        // Clients send input every 60 Hz physics step; leave headroom for
+        // pings and for bursts after a brief network stall.
+        if (++count > 200) {
           ws.close(1008, "Too many messages");
           return;
         }
@@ -87,14 +89,18 @@ export function startServer({
     const now = performance.now();
     acc += Math.min(250, now - prev);
     prev = now;
+    const ticksBefore = ticks;
     while (acc >= 1000 / 60) {
       for (const room of rooms.values()) room.tick();
       acc -= 1000 / 60;
       ticks++;
-      if (ticks % 3 === 0)
-        for (const room of rooms.values())
-          if (room.phase !== "lobby") room.broadcast();
     }
+    // ~20 snapshots a second. Windows timers often fire late and run two
+    // ticks at once; sending after the catch-up loop avoids back-to-back
+    // duplicate snapshots that made remote karts stutter.
+    if (Math.floor(ticks / 3) !== Math.floor(ticksBefore / 3))
+      for (const room of rooms.values())
+        if (room.phase !== "lobby") room.broadcast();
     for (const [code, room] of rooms) {
       if (!room.members.some((m) => m.connected)) {
         room.emptyAt ??= now;

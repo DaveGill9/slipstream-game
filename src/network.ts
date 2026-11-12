@@ -172,8 +172,11 @@ export class OnlineClient {
     if (this.socket?.readyState === WebSocket.OPEN)
       this.socket.send(JSON.stringify(data));
   }
+  /** Sends driving input and returns its sequence number. */
   input(input: Input, reset = false) {
-    this.send({ type: "input", ...input, reset, seq: this.seq++ });
+    const seq = this.seq++;
+    this.send({ type: "input", ...input, reset, seq });
+    return seq;
   }
   invite() {
     const url = new URL(location.href);

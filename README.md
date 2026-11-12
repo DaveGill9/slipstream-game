@@ -21,7 +21,7 @@ Original circuit geometry follows the supplied layout reference. Broad roads, sm
 
 ## Drafting and timing
 
-Top speed is tuned to 5.8 physics units per tick (a modest increase from 5.0). Follow within 24–130 world pixels, within 17 pixels of another kart's wake and within 20 degrees of its heading to gain up to 20% acceleration. Both karts must be moving on the same stretch of road. Boost does not stack and does not raise the engine speed limit. Short, fading air streaks are capped at 16 logical pixels; warm trails and the DRAFT HUD label indicate an active boost.
+Engine top speed is tuned to 7.95 physics units per tick, which reaches 80 km/h on the HUD once on-road drag is included (5.8 gave about 63 km/h). Follow within 24–130 world pixels, within 17 pixels of another kart's wake and within 20 degrees of its heading to gain up to 20% acceleration. Both karts must be moving on the same stretch of road. Boost does not stack and does not raise the engine speed limit. Short, fading air streaks are capped at 16 logical pixels; warm trails and the DRAFT HUD label indicate an active boost.
 
 The finish line requires a forward crossing after all checkpoints. Current/last lap and personal best are visible during racing; best lap and race records persist in browser local storage. Reset waiting time is included in lap time. Editing physics in F2 makes the session ineligible for records until reload. Saved records are local to this browser and game version.
 

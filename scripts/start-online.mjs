@@ -1,18 +1,70 @@
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:net";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile, rename, unlink } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 process.chdir(root);
-const publicGame = "https://slipstream-foundry.time-under-t-4756.chatgpt.site";
-const port = Number(process.env.PORT || 8080);
+// By default the game page is served from this PC through the same tunnel,
+// so players always get the exact build the server is running.
+// Set PUBLIC_GAME_URL to send players to a separately hosted copy instead.
+const publicGame = process.env.PUBLIC_GAME_URL || "";
+// Use PORT (default 8080), or the next free port if something else has it.
+const isFree = (p) =>
+  new Promise((done) => {
+    const probe = createServer()
+      .once("error", () => done(false))
+      .once("listening", () => probe.close(() => done(true)))
+      .listen(p, "127.0.0.1");
+  });
+const preferredPort = Number(process.env.PORT || 8080);
+let port = preferredPort;
+while (!(await isFree(port))) {
+  if (port >= preferredPort + 50)
+    throw Error(`No free port found between ${preferredPort} and ${port}.`);
+  port++;
+}
+if (port !== preferredPort)
+  console.log(`Port ${preferredPort} is busy, using port ${port} instead.`);
 if (Number(process.versions.node.split(".")[0]) < 22)
   throw Error("Install Node.js 22 or newer from https://nodejs.org/");
-if (!existsSync("server-dist/server.mjs"))
+// From a source checkout, rebuild when any game source is newer than the
+// last build, so edits are picked up just by relaunching.
+const newest = (path) => {
+  if (!existsSync(path)) return 0;
+  const info = statSync(path);
+  if (!info.isDirectory()) return info.mtimeMs;
+  return Math.max(
+    0,
+    ...readdirSync(path).map((name) => newest(join(path, name))),
+  );
+};
+if (existsSync("package.json") && existsSync("node_modules") && existsSync("src")) {
+  const built =
+    existsSync("server-dist/server.mjs") && existsSync("dist/index.html")
+      ? Math.min(
+          statSync("server-dist/server.mjs").mtimeMs,
+          statSync("dist/index.html").mtimeMs,
+        )
+      : 0;
+  const changed = Math.max(
+    ...["src", "server", "assets", "index.html", "package.json"].map(newest),
+  );
+  if (changed > built) {
+    console.log("Game files changed: rebuilding (takes a moment)…");
+    const result = spawnSync("npm", ["run", "build"], {
+      stdio: "inherit",
+      shell: true,
+    });
+    if (result.status !== 0)
+      throw Error("Build failed. Check the messages above.");
+  }
+}
+if (!existsSync("server-dist/server.mjs") || !existsSync("dist/index.html"))
   throw Error(
-    "Extract the whole multiplayer bundle, including server-dist and dist.",
+    "Game is not built yet. Run: npm ci && npm run build  (Start-Multiplayer.cmd does this automatically).",
   );
 let cloudflared = process.env.CLOUDFLARED_PATH || "cloudflared";
 if (process.platform === "win32" && !process.env.CLOUDFLARED_PATH) {
@@ -87,7 +139,7 @@ server.stdout.on("data", (chunk) => {
     const match = line.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/);
     if (match && !printed) {
       printed = true;
-      const url = new URL(publicGame);
+      const url = new URL(publicGame || match[0] + "/");
       url.searchParams.set(
         "server",
         match[0].replace("https:", "wss:") + "/race",

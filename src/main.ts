@@ -3,7 +3,7 @@ import Matter from "matter-js";
 import { OnlineClient, RoomPanel, type RoomState } from "./network";
 const defaultHandling = { ...tuning };
 import { readRecords, improveRecord, recordKey, formatTime } from "./records";
-import { Simulation, tuning } from "./simulation";
+import { Simulation, tuning, type Input } from "./simulation";
 import {
   WORLD,
   ROAD,
@@ -29,6 +29,11 @@ const names = [
   "ROSE",
   "MINT",
 ];
+// Online smoothing: how many unacknowledged local steps to replay on each
+// server snapshot (20 steps covers ~330 ms of round-trip time), and how
+// quickly a correction is blended away.
+const MAX_REPLAY_STEPS = 20;
+const SMOOTHING_MS = 150;
 const pixelScale = () =>
   Math.max(1, Math.floor(Math.min(innerWidth / 640, innerHeight / 360)));
 class Race extends Phaser.Scene {
@@ -49,6 +54,9 @@ class Race extends Phaser.Scene {
   networkRaceId = -1;
   sendElapsed = 0;
   pendingReset = false;
+  inputLog: { seq: number; input: Input }[] = [];
+  smoothing = Array.from({ length: 8 }, () => ({ x: 0, y: 0, a: 0 }));
+  podiumHostId = "";
   networkMessage = "";
   networkText!: Phaser.GameObjects.Text;
   kartLabels: Phaser.GameObjects.Text[] = [];
@@ -354,9 +362,12 @@ class Race extends Phaser.Scene {
       .fillStyle(primary ? 0xe3c66a : 0x365346)
       .fillRect(24, y, width, 30);
     const t = this.label(36, y + 8, text, 12, primary ? "#233d32" : "#e8e9cf");
+    // Phaser hit-tests each child with its own scroll factor, not the
+    // container's, so the zone must be fixed to the screen like its panel.
     const zone = this.add
       .zone(24, y, width, 30)
       .setOrigin(0)
+      .setScrollFactor(0)
       .setInteractive({ useHandCursor: true })
       .on("pointerdown", action);
     zone
@@ -549,15 +560,26 @@ class Race extends Phaser.Scene {
       );
     });
     if (this.online) {
-      if (this.roomState?.hostId === this.online.id)
+      if (this.isRoomHost())
         this.button(
           p,
           300,
-          "BACK TO LOBBY / RACE AGAIN",
-          () => this.online?.send({ type: "rematch" }),
+          "BACK TO LOBBY / RACE AGAIN          ENTER",
+          () => this.rematch(),
           true,
         );
-      else this.button(p, 300, "LEAVE ROOM", () => this.leaveOnline(), true);
+      else {
+        p.add(
+          this.label(
+            25,
+            289,
+            "WAITING FOR THE HOST TO RETURN TO THE LOBBY",
+            9,
+            "#aebb9d",
+          ),
+        );
+        this.button(p, 305, "LEAVE ROOM", () => this.leaveOnline());
+      }
     } else
       this.button(
         p,
@@ -566,6 +588,38 @@ class Race extends Phaser.Scene {
         () => this.start(),
         true,
       );
+  }
+  clearSmoothing() {
+    for (const s of this.smoothing) s.x = s.y = s.a = 0;
+  }
+  // One online physics step, mirroring the server: our kart uses local
+  // input, other karts keep their last known input, and finished or absent
+  // karts are held still.
+  stepOnline(input: Input) {
+    const inputs = new Map(
+      this.sim.karts.map((k) => [
+        k.id,
+        k.id === this.playerId ? input : k.input,
+      ]),
+    );
+    this.sim.step(input, inputs);
+    for (const k of this.sim.karts) {
+      const member = this.roomState?.members.find((m) => m.kart === k.id);
+      if (k.finish || !member?.connected || member.dnf) {
+        Matter.Body.setVelocity(k.body, { x: 0, y: 0 });
+        k.body.isSensor = true;
+      }
+    }
+  }
+  isRoomHost() {
+    return !!this.online && this.roomState?.hostId === this.online.id;
+  }
+  rematch() {
+    if (!this.online?.connected) {
+      this.networkMessage = "Not connected to the PC server.";
+      return;
+    }
+    this.online.send({ type: "rematch" });
   }
   openOnline() {
     Object.assign(tuning, defaultHandling);
@@ -597,6 +651,8 @@ class Race extends Phaser.Scene {
     this.sim = new Simulation();
     this.sprites.forEach((s) => s.setVisible(true));
     this.kartLabels.forEach((t) => t.setVisible(false));
+    this.inputLog = [];
+    this.clearSmoothing();
     this.input.keyboard!.enabled = true;
     this.networkMessage = "";
     this.garage();
@@ -637,7 +693,16 @@ class Race extends Phaser.Scene {
       const p = state.karts[this.playerId];
       this.cameras.main.centerOn(p.x, p.y);
       this.state = "countdown";
+      this.inputLog = [];
+      this.clearSmoothing();
     }
+    // Where each kart is drawn right now, so the correction below can be
+    // blended in over a few frames instead of popping.
+    const drawn = this.sim.karts.map((k, i) => ({
+      x: k.body.position.x + this.smoothing[i].x,
+      y: k.body.position.y + this.smoothing[i].y,
+      a: k.body.angle + this.smoothing[i].a,
+    }));
     this.sim.time = state.time;
     this.countdown = state.countdown;
     for (const remote of state.karts) {
@@ -669,8 +734,33 @@ class Race extends Phaser.Scene {
         !member?.connected ||
         !!member?.dnf;
     }
+    // Client-side prediction: the snapshot is a little old by the time it
+    // arrives. Re-run the local inputs the server had not processed yet so
+    // our own kart stays where we steered it instead of rubber-banding.
+    this.inputLog = this.inputLog.filter((entry) => entry.seq > me.seq);
+    if (
+      state.phase === "racing" &&
+      this.state === "race" &&
+      this.online.connected
+    )
+      for (const entry of this.inputLog.slice(-MAX_REPLAY_STEPS))
+        this.stepOnline(entry.input);
+    this.sim.karts.forEach((k, i) => {
+      const s = this.smoothing[i],
+        d = drawn[i];
+      s.x = d.x - k.body.position.x;
+      s.y = d.y - k.body.position.y;
+      s.a = Phaser.Math.Angle.Wrap(d.a - k.body.angle);
+      // Resets and big desyncs teleport rather than slide across the map.
+      if (Math.hypot(s.x, s.y) > 120) s.x = s.y = s.a = 0;
+    });
     if (state.phase === "podium") {
-      if (this.state !== "results") this.results();
+      this.inputLog = [];
+      // Redraw if the host changed so a new host gets the lobby button.
+      if (this.state !== "results" || this.podiumHostId !== state.hostId) {
+        this.podiumHostId = state.hostId;
+        this.results();
+      }
     } else if (this.state !== "pause")
       this.state = state.phase === "countdown" ? "countdown" : "race";
   }
@@ -714,7 +804,9 @@ class Race extends Phaser.Scene {
           32 + i * 23,
           sign < 0 ? "−" : "+",
           16,
-        ).setInteractive({ useHandCursor: true });
+        )
+          .setScrollFactor(0)
+          .setInteractive({ useHandCursor: true });
         t.on("pointerdown", () => {
           const k = key as keyof typeof tuning;
           this.tunedSession = true;
@@ -734,6 +826,8 @@ class Race extends Phaser.Scene {
       (this.state === "garage" || this.state === "results")
     )
       this.start();
+    if (pressed("ENTER") && this.state === "results" && this.isRoomHost())
+      this.rematch();
     if (pressed("M") && this.state === "garage") this.openOnline();
     if (pressed("ESC")) {
       if (this.state === "race" || this.state === "countdown") this.pause();
@@ -761,35 +855,37 @@ class Race extends Phaser.Scene {
         this.countText.setText("");
       }
     } else this.countText.setText("");
-    if (this.state === "race") {
+    // Online races keep running (with our kart idle) while the pit menu is open.
+    const onlineRunning =
+      !!this.online && (this.state === "race" || this.state === "pause");
+    if (this.state === "race" || onlineRunning) {
       this.accumulator += Math.min(delta, 100);
       const down = (...ks: string[]) => ks.some((k) => this.keys[k].isDown);
-      const input = {
-        throttle: down("W", "UP") ? 1 : down("S", "DOWN") ? -0.65 : 0,
-        steer: (down("D", "RIGHT") ? 1 : 0) - (down("A", "LEFT") ? 1 : 0),
-        drift: down("SPACE"),
-      };
-      if (this.online) {
-        this.sendElapsed += delta;
-        if (this.sendElapsed >= 33 || this.pendingReset) {
-          this.online.input(input, this.pendingReset);
-          this.pendingReset = false;
-          this.sendElapsed = 0;
-        }
-      }
+      const input =
+        this.state === "race"
+          ? {
+              throttle: down("W", "UP") ? 1 : down("S", "DOWN") ? -0.65 : 0,
+              steer:
+                (down("D", "RIGHT") ? 1 : 0) - (down("A", "LEFT") ? 1 : 0),
+              drift: down("SPACE"),
+            }
+          : { throttle: 0, steer: 0, drift: false };
       while (this.accumulator >= 1000 / 60) {
         if (this.online) {
-          const inputs = new Map(
-            this.sim.karts.map((k) => [
-              k.id,
-              k.id === this.playerId ? input : k.input,
-            ]),
-          );
-          if (this.online.connected && !this.sim.karts[this.playerId].finish)
-            this.sim.step(input, inputs);
+          // Send every physics step so the server sees input changes within
+          // one tick, and log it for replay when the next snapshot arrives.
+          if (this.online.connected) {
+            const seq = this.online.input(input, this.pendingReset);
+            this.pendingReset = false;
+            this.inputLog.push({ seq, input });
+            if (this.inputLog.length > 120) this.inputLog.shift();
+            this.stepOnline(input);
+          }
         } else this.sim.step(input);
         this.accumulator -= 1000 / 60;
       }
+    }
+    if (this.state === "race") {
       const kart = this.sim.karts[this.playerId];
       if (!this.online && kart.lapTimes.length > this.recordedLaps) {
         const last = kart.lapTimes.at(-1)!;
@@ -812,35 +908,23 @@ class Race extends Phaser.Scene {
       }
       if (kart.finish && !this.online) this.results();
     }
-    if (this.online && this.state === "pause") {
-      this.sendElapsed += delta;
-      if (this.sendElapsed > 100) {
-        this.online.input({ throttle: 0, steer: 0, drift: false });
-        this.sendElapsed = 0;
-      }
-    }
     const player = this.sim.karts[this.playerId] || this.sim.karts[0],
       b = player.body;
     this.effects.clear();
     this.trails.clear();
+    // Server corrections are drawn as an offset that fades out, so karts
+    // glide to their corrected spot with no added steering lag.
+    const fade = Math.exp(-Math.min(delta, 100) / SMOOTHING_MS);
     for (const k of this.sim.karts) {
-      const s = this.sprites[k.id];
-      const snap =
-        !this.online ||
-        Math.hypot(s.x - k.body.position.x, s.y - k.body.position.y) > 120;
-      const alpha = 1 - Math.exp(-Math.min(delta, 100) / 30);
+      const s = this.sprites[k.id],
+        smooth = this.smoothing[k.id];
+      smooth.x *= fade;
+      smooth.y *= fade;
+      smooth.a *= fade;
       s.setPosition(
-        Math.round(
-          snap
-            ? k.body.position.x
-            : Phaser.Math.Linear(s.x, k.body.position.x, alpha),
-        ),
-        Math.round(
-          snap
-            ? k.body.position.y
-            : Phaser.Math.Linear(s.y, k.body.position.y, alpha),
-        ),
-      ).setRotation(k.body.angle);
+        Math.round(k.body.position.x + smooth.x),
+        Math.round(k.body.position.y + smooth.y),
+      ).setRotation(k.body.angle + smooth.a);
       const member = this.roomState?.members.find((m) => m.kart === k.id);
       this.kartLabels[k.id]
         .setVisible(!!this.online && !!member)
@@ -902,8 +986,10 @@ class Race extends Phaser.Scene {
       }
     }
     const cam = this.cameras.main;
+    const drawnX = b.position.x + this.smoothing[player.id].x,
+      drawnY = b.position.y + this.smoothing[player.id].y;
     const tx =
-        b.position.x +
+        drawnX +
         Phaser.Math.Clamp(
           b.velocity.x * 22,
           -cam.width * 0.25,
@@ -911,7 +997,7 @@ class Race extends Phaser.Scene {
         ) -
         cam.width / 2,
       ty =
-        b.position.y +
+        drawnY +
         Phaser.Math.Clamp(
           b.velocity.y * 22,
           -cam.height * 0.25,
@@ -986,11 +1072,18 @@ class Race extends Phaser.Scene {
         );
   }
 }
+// Integer pixel scaling goes through Phaser's own zoom so its pointer
+// mapping matches the enlarged canvas (setting the canvas CSS size directly
+// left mouse clicks landing 2-3x away from where the cursor was).
 const game = new Phaser.Game({
   type: Phaser.CANVAS,
   parent: "game",
-  width: Math.ceil(innerWidth / pixelScale()),
-  height: Math.ceil(innerHeight / pixelScale()),
+  scale: {
+    mode: Phaser.Scale.NONE,
+    width: Math.ceil(innerWidth / pixelScale()),
+    height: Math.ceil(innerHeight / pixelScale()),
+    zoom: pixelScale(),
+  },
   pixelArt: true,
   roundPixels: true,
   backgroundColor: "#6e834c",
@@ -1000,8 +1093,8 @@ const game = new Phaser.Game({
 function resize() {
   const s = pixelScale();
   game.scale.resize(Math.ceil(innerWidth / s), Math.ceil(innerHeight / s));
-  game.canvas.style.width = `${Math.ceil(innerWidth / s) * s}px`;
-  game.canvas.style.height = `${Math.ceil(innerHeight / s) * s}px`;
+  // setZoom refreshes the canvas CSS size and pointer scale for the new size.
+  game.scale.setZoom(s);
 }
 game.canvas.style.outline = "none";
 game.canvas.tabIndex = 0;

@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import Matter from "matter-js";
 import { Simulation } from "../src/simulation.ts";
 const idle = () => ({ throttle: 0, steer: 0, drift: false });
+const round = (value, scale) => Math.round(value * scale) / scale;
 export class Room {
   constructor(code) {
     this.code = code;
@@ -208,15 +209,17 @@ export class Room {
         }),
       ),
       karts:
+        // Physics values are rounded well below a visible pixel, which
+        // roughly halves snapshot size for hosts with slower upload.
         this.sim?.karts.map((k) => ({
           id: k.id,
-          x: k.body.position.x,
-          y: k.body.position.y,
-          vx: k.body.velocity.x,
-          vy: k.body.velocity.y,
-          angle: k.body.angle,
-          angular: k.body.angularVelocity,
-          grip: k.grip,
+          x: round(k.body.position.x, 100),
+          y: round(k.body.position.y, 100),
+          vx: round(k.body.velocity.x, 1000),
+          vy: round(k.body.velocity.y, 1000),
+          angle: round(k.body.angle, 10000),
+          angular: round(k.body.angularVelocity, 10000),
+          grip: round(k.grip, 10000),
           lap: k.lap,
           gates: k.gates,
           nextGate: k.nextGate,
