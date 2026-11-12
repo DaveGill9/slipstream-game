@@ -10,7 +10,9 @@ Overhead kart-racing game (Phaser + TypeScript, Matter.js physics) played online
 
 ## Layout
 
-- `src/simulation.ts`: physics, bots, laps (shared by client and server). `tuning.topSpeed = 7.95` gives 80 km/h on the HUD (HUD km/h = speed × 13).
+- `src/simulation.ts`: physics, bots, laps (shared by client and server). Races are `LAPS = 6`. `tuning.topSpeed = 11.52` gives 100 km/h on the HUD (HUD km/h = speed × 13).
+- `src/track.ts`: builds every track in `assets/tracks/` (`tracks` map). Foundry is a Tiled map; Overpass is a plain JSON list of centreline points. A track that crosses itself gets a bridge automatically: segments near the crossing are layered, and karts/walls on different layers do not collide. Start straights must run left to right.
+- Track choice: solo from the garage menu (saved in localStorage); online the host picks in the lobby (`track` message, `track` field in snapshots).
 - `src/main.ts`: Phaser scene, menus, HUD, online client logic.
 - `src/network.ts`: WebSocket client and the lobby DOM panel.
 - `src/menu.ts`: HTML garage / settings / pit menus (same `.room-board` styling as the lobby, in `index.html`). Only the podium is still drawn on the pixel canvas.

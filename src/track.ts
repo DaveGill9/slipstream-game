@@ -1,111 +1,236 @@
-import circuit from "../assets/tracks/foundry.json";
+import foundryMap from "../assets/tracks/foundry.json";
+import overpassData from "../assets/tracks/overpass.json";
 export type Point = { x: number; y: number };
-const property = (name: string) =>
-  circuit.properties.find((p) => p.name === name)!.value;
-export const WORLD = {
-  width: property("worldWidth"),
-  height: property("worldHeight"),
-};
-export const ROAD = property("roadWidth");
-// Clockwise from the long southern straight. Original geometry inspired by reference 1.
-const racingLine = circuit.layers.find((l) => l.name === "Racing line")!
-  .objects[0];
-if (!("polyline" in racingLine))
-  throw new Error("Tiled Racing line layer needs a polyline");
-const anchors: [number, number][] = racingLine.polyline!.map((p) => [
-  p.x + racingLine.x,
-  p.y + racingLine.y,
-]);
-export const points: Point[] = [];
-for (let i = 0; i < anchors.length; i++) {
-  const a = anchors[(i - 1 + anchors.length) % anchors.length],
-    b = anchors[i],
-    c = anchors[(i + 1) % anchors.length],
-    d = anchors[(i + 2) % anchors.length];
-  for (let j = 0; j < 12; j++) {
-    const t = j / 12,
-      t2 = t * t,
-      t3 = t2 * t;
-    const f = (k: number) =>
-      0.5 *
-      (2 * b[k] +
-        (-a[k] + c[k]) * t +
-        (2 * a[k] - 5 * b[k] + 4 * c[k] - d[k]) * t2 +
-        (-a[k] + 3 * b[k] - 3 * c[k] + d[k]) * t3);
-    points.push({ x: f(0), y: f(1) });
-  }
-}
-export const lengths = [0];
-for (let i = 1; i <= points.length; i++) {
-  const a = points[i - 1],
-    b = points[i % points.length];
-  lengths.push(lengths[i - 1] + Math.hypot(b.x - a.x, b.y - a.y));
-}
-export const totalLength = lengths.at(-1)!;
-export function atDistance(s: number): Point {
-  s = ((s % totalLength) + totalLength) % totalLength;
-  let i = 0;
-  while (lengths[i + 1] < s) i++;
-  const t = (s - lengths[i]) / (lengths[i + 1] - lengths[i]);
-  const a = points[i],
-    b = points[(i + 1) % points.length];
-  return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
-}
-export function nearest(p: Point) {
-  let best = Infinity,
-    index = 0,
-    progress = 0,
-    q = points[0];
-  for (let i = 0; i < points.length; i++) {
-    const a = points[i],
-      b = points[(i + 1) % points.length],
-      dx = b.x - a.x,
-      dy = b.y - a.y;
-    const t = Math.max(
-      0,
-      Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy)),
-    );
-    const x = a.x + t * dx,
-      y = a.y + t * dy,
-      dist = (p.x - x) ** 2 + (p.y - y) ** 2;
-    if (dist < best) {
-      best = dist;
-      index = i;
-      progress = lengths[i] + t * (lengths[i + 1] - lengths[i]);
-      q = { x, y };
-    }
-  }
-  return { distance: Math.sqrt(best), index, progress, point: q };
-}
-export function offset(i: number, d: number) {
-  const p = points[i],
-    a = points[(i - 1 + points.length) % points.length],
-    b = points[(i + 1) % points.length];
-  const h = Math.atan2(b.y - a.y, b.x - a.x);
-  return { x: p.x - Math.sin(h) * d, y: p.y + Math.cos(h) * d };
+export interface TrackData {
+  id: string;
+  name: string;
+  width: number;
+  height: number;
+  road: number;
+  /** Centreline control points, in driving order. The start straight must
+   * run left to right (east) with room behind the line for the grid. */
+  anchors: number[][];
+  start: Point;
+  grandstands: { x: number; y: number; width: number; height: number }[];
+  sign?: Point;
 }
 export const angleDiff = (a: number, b: number) =>
   Math.atan2(Math.sin(a - b), Math.cos(a - b));
+// Where one stretch of road passes over another, each stretch is a layer for
+// this far either side of the crossing. Karts and walls on different layers
+// ignore each other, which is what makes it a bridge and not a junction.
+const BRIDGE_REACH = 190;
+export const LAYER = { ground: 0, under: 1, over: 2 } as const;
 
-// Shared by timing gates, grid paint and physical spawn positions.
-const start = circuit.layers.find((l) => l.name === "Timing")!.objects[0];
-export const START = { x: start.x, y: start.y };
-export const grandstands = circuit.layers.find(
-  (l) => l.name === "Grandstands",
-)!.objects;
-export const startDistance = nearest(START).progress;
-export const gatePosition = (gate: number, count = 24) =>
-  atDistance(startDistance + (gate * totalLength) / count);
-export const gridPosition = (id: number) => ({
-  x: START.x - 25 - Math.floor(id / 2) * 38,
-  y: START.y + (id % 2 ? 23 : -23),
-});
-export function wallVertices(index: number, side: number) {
-  const next = (index + 1) % points.length;
-  return [
-    offset(index, side * (ROAD / 2 + 22)),
-    offset(next, side * (ROAD / 2 + 22)),
-    offset(next, side * (ROAD / 2 + 30)),
-    offset(index, side * (ROAD / 2 + 30)),
-  ];
+export function buildTrack(data: TrackData) {
+  const WORLD = { width: data.width, height: data.height };
+  const ROAD = data.road;
+  const anchors = data.anchors;
+  const points: Point[] = [];
+  for (let i = 0; i < anchors.length; i++) {
+    const a = anchors[(i - 1 + anchors.length) % anchors.length],
+      b = anchors[i],
+      c = anchors[(i + 1) % anchors.length],
+      d = anchors[(i + 2) % anchors.length];
+    for (let j = 0; j < 12; j++) {
+      const t = j / 12,
+        t2 = t * t,
+        t3 = t2 * t;
+      const f = (k: number) =>
+        0.5 *
+        (2 * b[k] +
+          (-a[k] + c[k]) * t +
+          (2 * a[k] - 5 * b[k] + 4 * c[k] - d[k]) * t2 +
+          (-a[k] + 3 * b[k] - 3 * c[k] + d[k]) * t3);
+      points.push({ x: f(0), y: f(1) });
+    }
+  }
+  const count = points.length;
+  const lengths = [0];
+  for (let i = 1; i <= count; i++) {
+    const a = points[i - 1],
+      b = points[i % count];
+    lengths.push(lengths[i - 1] + Math.hypot(b.x - a.x, b.y - a.y));
+  }
+  const totalLength = lengths.at(-1)!;
+  const wrap = (s: number) => ((s % totalLength) + totalLength) % totalLength;
+  /** Index of the centreline segment that contains distance `s`. */
+  function segmentAt(s: number) {
+    s = wrap(s);
+    let i = 0;
+    while (lengths[i + 1] < s) i++;
+    return i;
+  }
+  function atDistance(s: number): Point {
+    s = wrap(s);
+    const i = segmentAt(s);
+    const t = (s - lengths[i]) / (lengths[i + 1] - lengths[i]);
+    const a = points[i],
+      b = points[(i + 1) % count];
+    return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
+  }
+  function scan(p: Point, from: number, span: number) {
+    let best = Infinity,
+      index = 0,
+      progress = 0,
+      q = points[0];
+    for (let n = 0; n < span; n++) {
+      const i = (((from + n) % count) + count) % count;
+      const a = points[i],
+        b = points[(i + 1) % count],
+        dx = b.x - a.x,
+        dy = b.y - a.y;
+      const t = Math.max(
+        0,
+        Math.min(
+          1,
+          ((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy),
+        ),
+      );
+      const x = a.x + t * dx,
+        y = a.y + t * dy,
+        dist = (p.x - x) ** 2 + (p.y - y) ** 2;
+      if (dist < best) {
+        best = dist;
+        index = i;
+        progress = lengths[i] + t * (lengths[i + 1] - lengths[i]);
+        q = { x, y };
+      }
+    }
+    return { distance: Math.sqrt(best), index, progress, point: q };
+  }
+  /**
+   * Closest point on the centreline. Pass the segment a kart was last on as
+   * `hint` so that, where the road crosses itself, the kart stays matched to
+   * the stretch it is actually driving on.
+   */
+  function nearest(p: Point, hint?: number) {
+    if (hint !== undefined) {
+      const back = 6,
+        span = 20;
+      const local = scan(p, hint - back, span);
+      const edge = (((local.index - hint + back) % count) + count) % count;
+      // Trust the local answer unless the kart has clearly been moved.
+      if (local.distance < ROAD && edge > 0 && edge < span - 1) return local;
+    }
+    return scan(p, 0, count);
+  }
+  function offset(i: number, d: number) {
+    const p = points[i],
+      a = points[(i - 1 + count) % count],
+      b = points[(i + 1) % count];
+    const h = Math.atan2(b.y - a.y, b.x - a.x);
+    return { x: p.x - Math.sin(h) * d, y: p.y + Math.cos(h) * d };
+  }
+  // Shared by timing gates, grid paint and physical spawn positions.
+  const START = { ...data.start };
+  const startDistance = nearest(START).progress;
+  const gatePosition = (gate: number, gates = 24) =>
+    atDistance(startDistance + (gate * totalLength) / gates);
+  const gridPosition = (id: number) => ({
+    x: START.x - 25 - Math.floor(id / 2) * 38,
+    y: START.y + (id % 2 ? 23 : -23),
+  });
+  function wallVertices(index: number, side: number) {
+    const next = (index + 1) % count;
+    return [
+      offset(index, side * (ROAD / 2 + 22)),
+      offset(next, side * (ROAD / 2 + 22)),
+      offset(next, side * (ROAD / 2 + 30)),
+      offset(index, side * (ROAD / 2 + 30)),
+    ];
+  }
+  // Find where the road crosses itself, if it does. The first pass through
+  // the crossing goes under; the second goes over the bridge.
+  const layer: number[] = Array(count).fill(LAYER.ground);
+  let bridge: { x: number; y: number; over: number; under: number } | null =
+    null;
+  search: for (let i = 0; i < count; i++)
+    for (let j = i + 2; j < count; j++) {
+      if (i === 0 && j === count - 1) continue;
+      const a = points[i],
+        b = points[(i + 1) % count],
+        c = points[j],
+        d = points[(j + 1) % count];
+      const rx = b.x - a.x,
+        ry = b.y - a.y,
+        sx = d.x - c.x,
+        sy = d.y - c.y;
+      const cross = rx * sy - ry * sx;
+      if (Math.abs(cross) < 1e-9) continue;
+      const t = ((c.x - a.x) * sy - (c.y - a.y) * sx) / cross,
+        u = ((c.x - a.x) * ry - (c.y - a.y) * rx) / cross;
+      if (t < 0 || t >= 1 || u < 0 || u >= 1) continue;
+      bridge = {
+        x: a.x + rx * t,
+        y: a.y + ry * t,
+        under: lengths[i] + t * (lengths[i + 1] - lengths[i]),
+        over: lengths[j] + u * (lengths[j + 1] - lengths[j]),
+      };
+      break search;
+    }
+  if (bridge)
+    for (let i = 0; i < count; i++) {
+      const middle = (lengths[i] + lengths[i + 1]) / 2;
+      const gap = (to: number) => {
+        const d = Math.abs(middle - to);
+        return Math.min(d, totalLength - d);
+      };
+      if (gap(bridge.under) < BRIDGE_REACH) layer[i] = LAYER.under;
+      if (gap(bridge.over) < BRIDGE_REACH) layer[i] = LAYER.over;
+    }
+  return {
+    id: data.id,
+    name: data.name,
+    WORLD,
+    ROAD,
+    points,
+    lengths,
+    totalLength,
+    segmentAt,
+    atDistance,
+    nearest,
+    offset,
+    START,
+    startDistance,
+    gatePosition,
+    gridPosition,
+    wallVertices,
+    grandstands: data.grandstands,
+    sign: data.sign,
+    /** Bridge layer of each centreline segment (see LAYER). */
+    layer,
+    bridge,
+  };
 }
+export type Track = ReturnType<typeof buildTrack>;
+
+// Foundry is a Tiled map (see README); newer tracks use the plain TrackData
+// JSON shape directly.
+function fromTiled(id: string, name: string, map: typeof foundryMap) {
+  const property = (key: string) =>
+    map.properties.find((p) => p.name === key)!.value;
+  const objects = (layerName: string) =>
+    map.layers.find((l) => l.name === layerName)!.objects;
+  const line = objects("Racing line")[0];
+  if (!("polyline" in line) || !line.polyline)
+    throw new Error("Tiled Racing line layer needs a polyline");
+  const start = objects("Timing")[0];
+  return buildTrack({
+    id,
+    name,
+    width: property("worldWidth"),
+    height: property("worldHeight"),
+    road: property("roadWidth"),
+    anchors: line.polyline.map((p) => [p.x + line.x, p.y + line.y]),
+    start: { x: start.x, y: start.y },
+    grandstands: objects("Grandstands"),
+    sign: { x: 780, y: 1195 },
+  });
+}
+export const tracks: Record<string, Track> = {
+  foundry: fromTiled("foundry", "FOUNDRY CIRCUIT", foundryMap),
+  overpass: buildTrack(overpassData),
+};
+export const trackIds = Object.keys(tracks);
+export const defaultTrack = tracks.foundry;

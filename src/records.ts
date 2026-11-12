@@ -2,10 +2,16 @@ export interface Records {
   lap: number | null;
   race: number | null;
 }
-export const recordKey = "slipstream.foundry.v2.records";
-export function readRecords(storage: Pick<Storage, "getItem">): Records {
+// v3: races became 6 laps at a higher top speed, so older times no longer
+// compare. Each track keeps its own records.
+export const recordKey = (trackId = "foundry") =>
+  `slipstream.${trackId}.v3.records`;
+export function readRecords(
+  storage: Pick<Storage, "getItem">,
+  trackId?: string,
+): Records {
   try {
-    const data = JSON.parse(storage.getItem(recordKey) || "{}");
+    const data = JSON.parse(storage.getItem(recordKey(trackId)) || "{}");
     const valid = (value: unknown): value is number =>
       typeof value === "number" && Number.isFinite(value) && value > 0;
     return {

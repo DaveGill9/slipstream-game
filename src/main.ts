@@ -11,18 +11,9 @@ document.addEventListener("click", (event) => {
   if ((event.target as Element).closest?.(".room-board button")) audio.click();
 });
 import { readRecords, improveRecord, recordKey, formatTime } from "./records";
-import { Simulation, tuning, type Input } from "./simulation";
-import {
-  WORLD,
-  ROAD,
-  points,
-  offset,
-  nearest,
-  START,
-  gridPosition,
-  wallVertices,
-  grandstands,
-} from "./track";
+import { Simulation, tuning, LAPS, type Input } from "./simulation";
+import { tracks, trackIds, defaultTrack, LAYER, type Track } from "./track";
+const soloTrackKey = "slipstream-track";
 const colors = [
   0xffd35a, 0x70bfff, 0xe97262, 0x91c876, 0xb38cde, 0xe7eee2, 0xec91b4,
   0x64d7c4,
@@ -91,35 +82,34 @@ class Race extends Phaser.Scene {
   lastCount = "";
   wasCounting = false;
   listeningTo?: Simulation;
+  track: Track = defaultTrack;
+  // The solo choice; online rooms use whatever the host picked.
+  soloTrack: Track = defaultTrack;
+  trackImage!: Phaser.GameObjects.Image;
+  deck?: Phaser.GameObjects.Image;
   constructor() {
     super("Race");
   }
   create() {
     try {
-      this.records = readRecords(localStorage);
+      this.soloTrack =
+        tracks[localStorage.getItem(soloTrackKey) || ""] ?? defaultTrack;
     } catch {
       /* Storage may be disabled. */
     }
-    this.makeTrack();
-    this.add.image(0, 0, "track").setOrigin(0);
-    this.marks = this.add
-      .renderTexture(0, 0, WORLD.width, WORLD.height)
-      .setOrigin(0);
-    this.effects = this.add.graphics();
+    this.effects = this.add.graphics().setDepth(2);
     this.trails = this.add.graphics().setDepth(4);
     this.makeKarts();
-    this.sim = new Simulation();
+    this.setTrack(this.soloTrack, true);
     this.sprites = this.sim.karts.map((k) =>
       this.add
         .image(k.body.position.x, k.body.position.y, `kart-${k.id}`)
         .setDepth(5),
     );
     this.kartLabels = this.sprites.map(() =>
-      this.label(0, 0, "", 9).setOrigin(0.5).setDepth(6),
+      this.label(0, 0, "", 9).setOrigin(0.5).setDepth(9),
     );
-    this.cameras.main
-      .setBounds(0, 0, WORLD.width, WORLD.height)
-      .setRoundPixels(true);
+    this.cameras.main.setRoundPixels(true);
     this.keys = this.input.keyboard!.addKeys(
       "W,A,S,D,UP,DOWN,LEFT,RIGHT,SPACE,R,ESC,ENTER,F2,M",
     ) as typeof this.keys;
@@ -146,8 +136,81 @@ class Race extends Phaser.Scene {
       lineSpacing: 6,
     });
   }
+  /** Switches circuit: scenery, skid-mark layer, camera limits and a fresh
+   * grid of karts. */
+  setTrack(track: Track, force = false) {
+    if (track === this.track && !force) return;
+    this.track = track;
+    const { WORLD } = track;
+    if (!this.textures.exists(`track-${track.id}`)) this.makeTrack();
+    this.trackImage ??= this.add.image(0, 0, "__DEFAULT").setOrigin(0);
+    this.trackImage.setTexture(`track-${track.id}`);
+    this.marks?.destroy();
+    this.marks = this.add
+      .renderTexture(0, 0, WORLD.width, WORLD.height)
+      .setOrigin(0)
+      .setDepth(1);
+    this.deck?.destroy();
+    this.deck = undefined;
+    if (track.bridge)
+      this.deck = this.add
+        .image(track.bridge.x, track.bridge.y, `deck-${track.id}`)
+        .setDepth(7);
+    this.cameras.main.setBounds(0, 0, WORLD.width, WORLD.height);
+    this.sim?.destroy();
+    this.sim = new Simulation(8, new Set([0]), track);
+    const grid = track.gridPosition(0);
+    this.cameras.main.centerOn(grid.x, grid.y);
+    try {
+      this.records = readRecords(localStorage, track.id);
+    } catch {
+      this.records = { lap: null, race: null };
+    }
+  }
+  /** The stretch of road on top of the bridge, drawn on any canvas. */
+  paintDeck(c: CanvasRenderingContext2D, half: number) {
+    const { ROAD, atDistance, bridge } = this.track;
+    if (!bridge) return;
+    const stroke = (width: number, colour: string, dash: number[] = []) => {
+      c.beginPath();
+      for (let d = -half; d <= half; d += 10) {
+        const p = atDistance(bridge.over + d);
+        d === -half ? c.moveTo(p.x, p.y) : c.lineTo(p.x, p.y);
+      }
+      c.lineCap = "butt";
+      c.lineWidth = width;
+      c.strokeStyle = colour;
+      c.setLineDash(dash);
+      c.stroke();
+      c.setLineDash([]);
+    };
+    stroke(ROAD + 64, "#40574e");
+    stroke(ROAD + 60, "#a9b5a5");
+    stroke(ROAD + 44, "#7d8a80");
+    stroke(ROAD + 16, "#e7e4ca");
+    stroke(ROAD, "#4a5252");
+    stroke(1, "#939887", [12, 22]);
+  }
   makeTrack() {
-    const tex = this.textures.createCanvas("track", WORLD.width, WORLD.height)!;
+    const {
+      WORLD,
+      ROAD,
+      points,
+      offset,
+      nearest,
+      START,
+      gridPosition,
+      wallVertices,
+      grandstands,
+      bridge,
+      sign,
+      name,
+    } = this.track;
+    const tex = this.textures.createCanvas(
+      `track-${this.track.id}`,
+      WORLD.width,
+      WORLD.height,
+    )!;
     const c = tex.context;
     let seed = 73;
     const random = () => {
@@ -267,11 +330,39 @@ class Race extends Phaser.Scene {
         c.fillRect(x + 7, y + 7 + row * 12, w - 14, 8);
       }
     }
-    c.fillStyle = "#d0b963";
-    c.fillRect(780, 1195, 255, 30);
-    c.fillStyle = "#293e35";
-    c.font = "bold 18px monospace";
-    c.fillText("FOUNDRY CIRCUIT", 794, 1217);
+    if (sign) {
+      c.font = "bold 18px monospace";
+      c.fillStyle = "#d0b963";
+      c.fillRect(sign.x, sign.y, c.measureText(name).width + 28, 30);
+      c.fillStyle = "#293e35";
+      c.fillText(name, sign.x + 14, sign.y + 22);
+    }
+    if (bridge) {
+      // The bridge's shadow falls on the road underneath. The deck itself
+      // is a separate image drawn above the karts that pass below it.
+      const half = ROAD / 2 + 34;
+      c.save();
+      c.translate(7, 9);
+      c.globalAlpha = 0.3;
+      c.beginPath();
+      for (let d = -half; d <= half; d += 10) {
+        const p = this.track.atDistance(bridge.over + d);
+        d === -half ? c.moveTo(p.x, p.y) : c.lineTo(p.x, p.y);
+      }
+      c.lineWidth = ROAD + 64;
+      c.strokeStyle = "#101c1a";
+      c.stroke();
+      c.restore();
+      const size = Math.ceil(half * 2 + ROAD + 80);
+      const deck = this.textures.createCanvas(
+        `deck-${this.track.id}`,
+        size,
+        size,
+      )!;
+      deck.context.translate(size / 2 - bridge.x, size / 2 - bridge.y);
+      this.paintDeck(deck.context, half);
+      deck.refresh();
+    }
     tex.refresh();
   }
   makeKarts() {
@@ -316,7 +407,7 @@ class Race extends Phaser.Scene {
       .strokeRect(12, 12, 186, 46)
       .strokeRect(w - 136, 12, 124, 46);
     this.hud.add(g);
-    this.hudText = this.label(23, 21, "FOUNDRY / PRACTICE", 11);
+    this.hudText = this.label(23, 21, "", 11);
     this.speedText = this.label(w - 125, 21, "000 KM/H", 12);
     this.hud.add([this.hudText, this.speedText]);
     g.fillRect(12, 64, 186, 58);
@@ -404,15 +495,27 @@ class Race extends Phaser.Scene {
   }
   garage() {
     this.state = "garage";
-    this.openMenu(
-      "SLIPSTREAM",
-      "FOUNDRY CIRCUIT  /  8 KARTS  /  3 LAPS",
-      "main",
-    )
+    this.openMenu("SLIPSTREAM", `8 KARTS  /  ${LAPS} LAPS`, "main")
       .button("SOLO PRACTICE", () => this.start(), {
         primary: true,
         key: "ENTER",
       })
+      .button(
+        "TRACK",
+        () => {
+          const next =
+            trackIds[(trackIds.indexOf(this.track.id) + 1) % trackIds.length];
+          this.soloTrack = tracks[next];
+          try {
+            localStorage.setItem(soloTrackKey, next);
+          } catch {
+            /* The choice still applies for this visit. */
+          }
+          this.setTrack(this.soloTrack);
+          this.garage();
+        },
+        { key: `${this.track.name}  \u25B8` },
+      )
       .button("RACE WITH FRIENDS", () => this.openOnline(), { key: "M" })
       .button("SETTINGS", () => this.settings(() => this.garage()));
   }
@@ -447,7 +550,7 @@ class Race extends Phaser.Scene {
     this.playerId = 0;
     this.sprites.forEach((s) => s.setVisible(true));
     this.sim.destroy();
-    this.sim = new Simulation();
+    this.sim = new Simulation(8, new Set([0]), this.track);
     this.marks.clear();
     this.recordedLaps = 0;
     this.lapNotice = "";
@@ -500,8 +603,8 @@ class Race extends Phaser.Scene {
     const p = this.board(
       "RACE PODIUM",
       this.online
-        ? "FOUNDRY CIRCUIT / ROOM " + this.online.code
-        : "FOUNDRY CIRCUIT / SOLO PRACTICE",
+        ? `${this.track.name} / ROOM ${this.online.code}`
+        : `${this.track.name} / SOLO PRACTICE`,
       348,
     );
     const order = this.online
@@ -646,8 +749,7 @@ class Race extends Phaser.Scene {
     this.roomPanel?.destroy();
     this.roomPanel = undefined;
     this.playerId = 0;
-    this.sim.destroy();
-    this.sim = new Simulation();
+    this.setTrack(this.soloTrack, true);
     this.sprites.forEach((s) => s.setVisible(true));
     this.kartLabels.forEach((t) => t.setVisible(false));
     this.inputLog = [];
@@ -661,6 +763,7 @@ class Race extends Phaser.Scene {
     this.roomState = state;
     const me = state.members.find((m) => m.id === this.online!.id);
     if (!me) return;
+    this.setTrack(tracks[state.track] ?? defaultTrack);
     if (state.phase === "lobby") {
       this.state = "lobby";
       this.closeMenus();
@@ -676,6 +779,7 @@ class Race extends Phaser.Scene {
       this.sim = new Simulation(
         state.karts.length,
         new Set(state.karts.map((k) => k.id)),
+        this.track,
       );
       this.networkRaceId = state.raceId;
       this.accumulator = 0;
@@ -720,6 +824,7 @@ class Race extends Phaser.Scene {
         "resetRemaining",
         "respawnGrace",
         "draft",
+        "segment",
       ] as const)
         k[key] = remote[key];
       k.lapTimes = [...remote.lapTimes];
@@ -915,7 +1020,10 @@ class Race extends Phaser.Scene {
           if (kart.finish)
             this.records.race = improveRecord(this.records.race, kart.finish);
           try {
-            localStorage.setItem(recordKey, JSON.stringify(this.records));
+            localStorage.setItem(
+              recordKey(this.track.id),
+              JSON.stringify(this.records),
+            );
           } catch {
             /* Race remains playable. */
           }
@@ -972,7 +1080,10 @@ class Race extends Phaser.Scene {
       s.setPosition(
         Math.round(k.body.position.x + smooth.x),
         Math.round(k.body.position.y + smooth.y),
-      ).setRotation(k.body.angle + smooth.a);
+      )
+        .setRotation(k.body.angle + smooth.a)
+        // Karts on the bridge are drawn above its deck; the rest pass below.
+        .setDepth(this.track.layer[k.segment] === LAYER.over ? 8 : 5);
       const member = this.roomState?.members.find((m) => m.kart === k.id);
       this.kartLabels[k.id]
         .setVisible(!!this.online && !!member)
@@ -1085,7 +1196,7 @@ class Race extends Phaser.Scene {
         : "",
     );
     this.hudText.setText(
-      `P${pos} / ${this.sim.karts.length}     LAP ${Math.min(3, player.lap + 1)} / 3\n${this.sim.time.toFixed(1).padStart(5, "0")}   FOUNDRY CIRCUIT`,
+      `P${pos} / ${this.sim.karts.length}     LAP ${Math.min(LAPS, player.lap + 1)} / ${LAPS}\n${this.sim.time.toFixed(1).padStart(5, "0")}   ${this.track.name}`,
     );
     this.timingText.setText(
       `LAP  ${formatTime(player.finish ? player.lapTimes.at(-1)! : this.sim.time - player.lapStartedAt)}\nLAST ${formatTime(player.lapTimes.at(-1) ?? null)}\nPB   ${formatTime(this.records.lap)}${this.tunedSession ? " *" : ""}`,
@@ -1094,13 +1205,15 @@ class Race extends Phaser.Scene {
     this.speedText.setText(
       `${String(Math.round(Math.hypot(b.velocity.x, b.velocity.y) * 13)).padStart(3, "0")} KM/H\n${player.draft > 0.1 ? "DRAFT +" + Math.round(player.draft * 20) + "%" : player.input.drift ? "DRIFT" : "SLIPSTREAM"}`,
     );
-    const mx = this.scale.width - 124,
-      my = this.scale.height - 88,
-      scale = 0.043;
+    const { points, WORLD } = this.track;
+    // Fit the whole circuit inside the 104 x 64 map window.
+    const scale = Math.min(104 / WORLD.width, 64 / WORLD.height);
+    const mx = this.scale.width - 124 + (104 - WORLD.width * scale) / 2,
+      my = this.scale.height - 88 + (64 - WORLD.height * scale) / 2;
     this.map
       .clear()
       .fillStyle(0x203630, 0.85)
-      .fillRect(mx - 8, my - 8, 120, 80)
+      .fillRect(this.scale.width - 132, this.scale.height - 96, 120, 80)
       .lineStyle(5, 0x7b8c78);
     this.map.beginPath();
     points.forEach((p, i) =>

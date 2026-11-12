@@ -20,7 +20,16 @@ test("rooms require two ready players and host permission; inputs control distin
   const { room, a, b } = setup();
   assert.throws(() => room.message(b, { type: "start" }), /host/);
   assert.throws(() => room.message(a, { type: "start" }), /ready/);
+  assert.throws(
+    () => room.message(b, { type: "track", track: "overpass" }),
+    /host/,
+  );
+  room.message(a, { type: "track", track: "nowhere" });
+  assert.equal(room.snapshot().track, "foundry");
+  room.message(a, { type: "track", track: "overpass" });
+  assert.equal(room.snapshot().track, "overpass");
   start(room, a, b);
+  assert.equal(room.sim.track.id, "overpass");
   assert.equal(room.phase, "racing");
   assert.equal(room.sim.karts.length, 2);
   const before = room.sim.karts.map((k) => k.body.position.x);

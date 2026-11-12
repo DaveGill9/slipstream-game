@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import Matter from "matter-js";
 import { Simulation } from "../src/simulation.ts";
+import { tracks, defaultTrack } from "../src/track.ts";
 const idle = () => ({ throttle: 0, steer: 0, drift: false });
 const round = (value, scale) => Math.round(value * scale) / scale;
 export class Room {
@@ -8,6 +9,7 @@ export class Room {
     this.code = code;
     this.members = [];
     this.phase = "lobby";
+    this.track = defaultTrack.id;
     this.hostId = "";
     this.sim = null;
     this.countdown = 0;
@@ -88,6 +90,12 @@ export class Room {
     if (data.type === "ready" && this.phase === "lobby") {
       m.ready = !!data.ready;
       this.broadcast();
+    } else if (data.type === "track") {
+      if (m.id !== this.hostId)
+        throw Error("Only the room host picks the track.");
+      if (this.phase !== "lobby" || !Object.hasOwn(tracks, data.track)) return;
+      this.track = data.track;
+      this.broadcast();
     } else if (data.type === "start") {
       if (m.id !== this.hostId) throw Error("Only the room host can start.");
       if (
@@ -100,6 +108,7 @@ export class Room {
       this.sim = new Simulation(
         this.members.length,
         new Set(this.members.map((_, i) => i)),
+        tracks[this.track],
       );
       this.members.forEach((p, i) => {
         p.kart = i;
@@ -191,6 +200,7 @@ export class Room {
       code: this.code,
       hostId: this.hostId,
       phase: this.phase,
+      track: this.track,
       countdown: this.countdown,
       raceId: this.raceId,
       time: this.sim?.time || 0,
@@ -229,6 +239,7 @@ export class Room {
           resetRemaining: k.resetRemaining,
           respawnGrace: k.respawnGrace,
           draft: k.draft,
+          segment: k.segment,
           input: k.input,
         })) || [],
       order:

@@ -1,4 +1,5 @@
 import type { Input } from "./simulation";
+import { tracks } from "./track";
 export interface NetKart {
   id: number;
   x: number;
@@ -17,6 +18,7 @@ export interface NetKart {
   resetRemaining: number;
   respawnGrace: number;
   draft: number;
+  segment: number;
   input: Input;
 }
 export interface Member {
@@ -33,6 +35,7 @@ export interface RoomState {
   code: string;
   hostId: string;
   phase: "lobby" | "countdown" | "racing" | "podium";
+  track: string;
   countdown: number;
   raceId: number;
   time: number;
@@ -258,6 +261,24 @@ export class RoomPanel {
       row.textContent = `${member.name}${member.id === this.client.id ? " (YOU)" : ""}${member.id === state.hostId ? " · HOST" : ""} — ${member.connected ? (member.ready ? "READY" : "GETTING READY") : "RECONNECTING"}`;
       list.append(row);
     }
+    // The host chooses the circuit; everyone else sees the choice.
+    const row = document.createElement("label");
+    row.textContent = "TRACK";
+    if (state.hostId === this.client.id) {
+      const select = document.createElement("select");
+      for (const track of Object.values(tracks))
+        select.add(new Option(track.name, track.id));
+      select.value = state.track;
+      select.onchange = () =>
+        this.client.send({ type: "track", track: select.value });
+      row.append(select);
+    } else {
+      const chosen = document.createElement("strong");
+      chosen.className = "room-track";
+      chosen.textContent = tracks[state.track]?.name ?? state.track;
+      row.append(chosen);
+    }
+    this.body.append(row);
     this.body.append(list);
     const me = state.members.find((m) => m.id === this.client.id);
     const button = (text: string, fn: () => void) => {

@@ -1,16 +1,14 @@
 import Matter from "matter-js";
-import {
-  points,
-  wallVertices,
-  gridPosition,
-  gatePosition,
-  nearest,
-  atDistance,
-  totalLength,
-  START,
-  angleDiff,
-  ROAD,
-} from "./track";
+import { angleDiff, defaultTrack, type Track } from "./track";
+export const LAPS = 6;
+// Collision categories. Where the road crosses itself, karts and walls on
+// the bridge ignore the ones underneath it, and the other way round.
+const WALL = 1,
+  KART = 2,
+  KART_OVER = 4,
+  KART_UNDER = 8,
+  WALL_OVER = 16,
+  WALL_UNDER = 32;
 export interface Input {
   throttle: number;
   steer: number;
@@ -18,9 +16,9 @@ export interface Input {
 }
 export const tuning = {
   acceleration: 0.00038,
-  // Engine taper limit. With on-road drag, 7.95 gives an 80 km/h top speed
-  // on the HUD (5.8 gave about 63 km/h).
-  topSpeed: 7.95,
+  // Engine taper limit. With on-road drag, 11.52 gives a 100 km/h top speed
+  // on the HUD (7.95 gave 80 km/h).
+  topSpeed: 11.52,
   braking: 0.0009,
   steering: 0.042,
   grip: 0.2,
@@ -43,6 +41,10 @@ export class Kart {
   resetCount = 0;
   respawnGrace = 0;
   draft = 0;
+  /** Centreline segment the kart is on; keeps it on its own stretch of
+   * road where the track crosses itself. */
+  segment = 0;
+  near = { distance: 0, index: 0, progress: 0, point: { x: 0, y: 0 } };
   lapTimes: number[] = [];
   lapStartedAt = 0;
   constructor(
@@ -69,7 +71,9 @@ export class Simulation {
   constructor(
     public count = 8,
     public humans = new Set([0]),
+    public track: Track = defaultTrack,
   ) {
+    const { points, wallVertices, gridPosition } = track;
     for (let side of [-1, 1])
       for (let i = 0; i < points.length; i++) {
         const vertices = wallVertices(i, side);
@@ -79,6 +83,11 @@ export class Simulation {
           frictionStatic: 0,
           restitution: 0.05,
           label: "wall",
+          collisionFilter: {
+            category: [WALL, WALL_UNDER, WALL_OVER][track.layer[i]],
+            mask: 0xffffffff,
+            group: 0,
+          },
         };
         // Tight offset bends can produce concave quads. Triangulate those
         // explicitly so Matter never substitutes a convex hull for the wall.
@@ -106,13 +115,21 @@ export class Simulation {
     for (let i = 0; i < count; i++) {
       const p = gridPosition(i);
       const k = new Kart(i, p.x, p.y);
+      this.locate(k);
       this.karts.push(k);
       Matter.Composite.add(this.engine.world, k.body);
     }
   }
+  /** Refreshes which piece of road the kart is on. */
+  locate(k: Kart, hint?: number) {
+    k.near = this.track.nearest(k.body.position, hint);
+    k.segment = k.near.index;
+  }
   resetKart(k: Kart) {
     if (k.resetRemaining > 0 || k.finish) return;
-    const n = nearest(k.body.position);
+    const { atDistance, segmentAt } = this.track;
+    this.locate(k, k.segment);
+    const n = k.near;
     const p = atDistance(n.progress - 100),
       q = atDistance(n.progress - 85);
     k.resetRemaining = 1.5;
@@ -122,6 +139,7 @@ export class Simulation {
     Matter.Body.setStatic(k.body, true);
     k.body.isSensor = true;
     Matter.Body.setPosition(k.body, p);
+    this.locate(k, segmentAt(n.progress - 100));
     k.previousPosition = { ...p };
     Matter.Body.setAngle(k.body, Math.atan2(q.y - p.y, q.x - p.x));
     Matter.Body.setVelocity(k.body, { x: 0, y: 0 });
@@ -129,8 +147,9 @@ export class Simulation {
     k.stuck = 0;
   }
   bot(k: Kart): Input {
+    const { atDistance } = this.track;
     const b = k.body,
-      n = nearest(b.position),
+      n = k.near,
       speed = Math.hypot(b.velocity.x, b.velocity.y);
     const look = atDistance(n.progress + 40 + speed * 13),
       far = atDistance(n.progress + 130);
@@ -149,7 +168,8 @@ export class Simulation {
   draftStrength(k: Kart) {
     if (k.resetRemaining || k.respawnGrace || k.finish || k.body.speed < 1.5)
       return 0;
-    const n = nearest(k.body.position);
+    const { ROAD, totalLength } = this.track;
+    const n = this.track.nearest(k.body.position, k.segment);
     if (n.distance > ROAD / 2) return 0;
     let strength = 0;
     for (const leader of this.karts) {
@@ -170,7 +190,7 @@ export class Simulation {
         -dx * Math.sin(leader.body.angle) + dy * Math.cos(leader.body.angle),
       );
       if (along < 24 || along > 130 || across > 17) continue;
-      const ln = nearest(leader.body.position);
+      const ln = this.track.nearest(leader.body.position, leader.segment);
       const gap = (ln.progress - n.progress + totalLength) % totalLength;
       // Nearby parallel sections separated by a wall cannot share a draft.
       if (ln.distance > ROAD / 2 || gap > 150 || Math.abs(gap - along) > 30)
@@ -187,7 +207,9 @@ export class Simulation {
     return strength;
   }
   step(player: Input, inputs?: Map<number, Input>) {
+    const { ROAD, START, gatePosition } = this.track;
     this.time += 1 / 60;
+    for (const k of this.karts) this.locate(k, k.segment);
     const drafts = this.karts.map((k) => this.draftStrength(k));
     for (const k of this.karts) {
       const b = k.body;
@@ -205,15 +227,18 @@ export class Simulation {
         continue;
       }
       // Brief collision grace lets the recovering kart safely rejoin traffic.
-      if (k.respawnGrace > 0) {
+      if (k.respawnGrace > 0)
         k.respawnGrace = Math.max(0, k.respawnGrace - 1 / 60);
-        if (!k.respawnGrace) b.collisionFilter.mask = 0xffffffff;
-      }
+      const level = this.track.layer[k.segment];
+      b.collisionFilter.category = [KART, KART_UNDER, KART_OVER][level];
+      b.collisionFilter.mask =
+        (k.respawnGrace > 0 ? WALL | WALL_OVER | WALL_UNDER : 0xffffffff) &
+        ~[0, KART_OVER | WALL_OVER, KART_UNDER | WALL_UNDER][level];
       k.input = this.humans.has(k.id)
         ? (inputs?.get(k.id) ??
           (k.id === 0 ? player : { throttle: 0, steer: 0, drift: false }))
         : this.bot(k);
-      const n = nearest(b.position),
+      const n = k.near,
         off = n.distance > ROAD / 2;
       const f = { x: Math.cos(b.angle), y: Math.sin(b.angle) },
         r = { x: -f.y, y: f.x };
@@ -270,7 +295,7 @@ export class Simulation {
           k.lap++;
           k.lapTimes.push(this.time - k.lapStartedAt);
           k.lapStartedAt = this.time;
-          if (k.lap === 3 && !k.finish) k.finish = this.time;
+          if (k.lap === LAPS && !k.finish) k.finish = this.time;
         }
       }
       k.previousPosition = { ...b.position };
@@ -286,7 +311,7 @@ export class Simulation {
       if (a.finish || b.finish)
         return (a.finish || Infinity) - (b.finish || Infinity);
       const progress = (k: Kart) => {
-        const target = gatePosition(k.nextGate, this.gateCount);
+        const target = this.track.gatePosition(k.nextGate, this.gateCount);
         return (
           k.gates * 10000 -
           Math.hypot(k.body.position.x - target.x, k.body.position.y - target.y)

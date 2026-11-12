@@ -1,17 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import Matter from "matter-js";
-import { Simulation, tuning } from "./simulation.ts";
-import {
+import { Simulation, tuning, LAPS } from "./simulation.ts";
+import { tracks, LAYER } from "./track.ts";
+const {
   atDistance,
-  totalLength,
   gatePosition,
   startDistance,
   nearest,
   gridPosition,
   wallVertices,
   points,
-} from "./track.ts";
+} = tracks.foundry;
 const idle = { throttle: 0, steer: 0, drift: false };
 test("throttle accelerates, brake slows, reset removes velocity without awarding gates", () => {
   const s = new Simulation(),
@@ -27,13 +27,13 @@ test("throttle accelerates, brake slows, reset removes velocity without awarding
   assert.equal(k.gates, gates);
   s.destroy();
 });
-test("finish line shortcuts do not count; ordered gates complete exactly three laps", () => {
+test("finish line shortcuts do not count; ordered gates complete exactly the race distance", () => {
   const s = new Simulation(),
     k = s.karts[0];
   Matter.Body.setPosition(k.body, gatePosition(0));
   s.step(idle);
   assert.equal(k.lap, 0);
-  for (let lap = 0; lap < 3; lap++)
+  for (let lap = 0; lap < LAPS; lap++)
     for (let i = 1; i <= 24; i++) {
       Matter.Body.setPosition(k.body, gatePosition(i % 24));
       Matter.Body.setVelocity(k.body, { x: 0, y: 0 });
@@ -42,20 +42,80 @@ test("finish line shortcuts do not count; ordered gates complete exactly three l
         k.previousPosition = { x: k.body.position.x - 2, y: k.body.position.y };
       s.step(idle);
     }
-  assert.equal(k.lap, 3);
+  assert.equal(k.lap, LAPS);
   assert.ok(k.finish > 0);
   s.destroy();
 });
-test("seven bots navigate a full race and remain numerically stable", () => {
-  const s = new Simulation();
-  for (let i = 0; i < 25000; i++) {
-    s.step(idle);
-    if (s.karts.slice(1).every((k) => k.finish)) break;
-  }
-  for (const k of s.karts.slice(1)) {
-    assert.ok(Number.isFinite(k.body.position.x));
-    assert.ok(k.finish > 0, `bot ${k.id}: ${k.lap} laps, ${k.gates} gates`);
-  }
+for (const track of Object.values(tracks))
+  test(`seven bots navigate a full race on ${track.id} and remain numerically stable`, () => {
+    const s = new Simulation(8, new Set([0]), track);
+    for (let i = 0; i < 40000; i++) {
+      s.step(idle);
+      if (s.karts.slice(1).every((k) => k.finish)) break;
+    }
+    for (const k of s.karts.slice(1)) {
+      assert.ok(Number.isFinite(k.body.position.x));
+      assert.ok(k.finish > 0, `bot ${k.id}: ${k.lap} laps, ${k.gates} gates`);
+      assert.ok(k.resetCount <= 2, `bot ${k.id} reset ${k.resetCount} times`);
+    }
+    s.destroy();
+  });
+test("the overpass bridge keeps the two roads apart", () => {
+  const track = tracks.overpass;
+  assert.ok(track.bridge, "the figure-eight track crosses itself");
+  const s = new Simulation(2, new Set([0, 1]), track),
+    [low, high] = s.karts;
+  const place = (k, distance, speed) => {
+    const p = track.atDistance(distance),
+      q = track.atDistance(distance + 5);
+    Matter.Body.setPosition(k.body, p);
+    Matter.Body.setAngle(k.body, Math.atan2(q.y - p.y, q.x - p.x));
+    Matter.Body.setVelocity(k.body, {
+      x: ((q.x - p.x) / 5) * speed,
+      y: ((q.y - p.y) / 5) * speed,
+    });
+    s.locate(k, track.segmentAt(distance));
+  };
+  // Both karts reach the crossing point at the same moment.
+  place(low, track.bridge.under - 60, 6);
+  place(high, track.bridge.over - 60, 6);
+  const input = { ...idle, throttle: 1 };
+  const drive = () =>
+    s.step(
+      idle,
+      new Map([
+        [0, input],
+        [1, input],
+      ]),
+    );
+  for (let i = 0; i < 10; i++) drive();
+  assert.equal(track.layer[low.segment], LAYER.under);
+  assert.equal(track.layer[high.segment], LAYER.over);
+  assert.ok(
+    Math.hypot(
+      low.body.position.x - high.body.position.x,
+      low.body.position.y - high.body.position.y,
+    ) < 20,
+    "the karts overlap at the crossing",
+  );
+  for (let i = 0; i < 30; i++) drive();
+  // Neither was knocked off line or stopped by the other road's walls.
+  assert.ok(low.near.progress > track.bridge.under + 100);
+  assert.ok(high.near.progress > track.bridge.over + 100);
+  assert.ok(low.near.distance < 5 && high.near.distance < 5);
+  // A kart that turns hard on the bridge is still held in by its rails.
+  place(high, track.bridge.over, 0);
+  Matter.Body.setAngle(high.body, high.body.angle + Math.PI / 2);
+  for (let i = 0; i < 120; i++)
+    s.step(
+      idle,
+      new Map([
+        [0, idle],
+        [1, input],
+      ]),
+    );
+  assert.ok(high.near.distance < track.ROAD / 2 + 30, "rail contains the kart");
+  assert.equal(track.layer[high.segment], LAYER.over);
   s.destroy();
 });
 test("rear contact transfers momentum and a barrier contains a kart", () => {
