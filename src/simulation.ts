@@ -64,7 +64,10 @@ export class Simulation {
   karts: Kart[] = [];
   time = 0;
   gateCount = 24;
-  constructor() {
+  constructor(
+    public count = 8,
+    public humans = new Set([0]),
+  ) {
     for (let side of [-1, 1])
       for (let i = 0; i < points.length; i++) {
         const vertices = wallVertices(i, side);
@@ -98,7 +101,7 @@ export class Simulation {
             : Matter.Body.create({ ...options, parts });
         Matter.Composite.add(this.engine.world, wall);
       }
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < count; i++) {
       const p = gridPosition(i);
       const k = new Kart(i, p.x, p.y);
       this.karts.push(k);
@@ -181,7 +184,7 @@ export class Simulation {
     }
     return strength;
   }
-  step(player: Input) {
+  step(player: Input, inputs?: Map<number, Input>) {
     this.time += 1 / 60;
     const drafts = this.karts.map((k) => this.draftStrength(k));
     for (const k of this.karts) {
@@ -204,7 +207,10 @@ export class Simulation {
         k.respawnGrace = Math.max(0, k.respawnGrace - 1 / 60);
         if (!k.respawnGrace) b.collisionFilter.mask = 0xffffffff;
       }
-      k.input = k.id ? this.bot(k) : player;
+      k.input = this.humans.has(k.id)
+        ? (inputs?.get(k.id) ??
+          (k.id === 0 ? player : { throttle: 0, steer: 0, drift: false }))
+        : this.bot(k);
       const n = nearest(b.position),
         off = n.distance > ROAD / 2;
       const f = { x: Math.cos(b.angle), y: Math.sin(b.angle) },
@@ -266,7 +272,7 @@ export class Simulation {
         }
       }
       k.previousPosition = { ...b.position };
-      if (k.id) {
+      if (!this.humans.has(k.id)) {
         k.stuck = Math.abs(forward) < 0.6 ? k.stuck + 1 / 60 : 0;
         if (k.stuck > 2.5) this.resetKart(k);
       }

@@ -1,4 +1,7 @@
 import Phaser from "phaser";
+import Matter from "matter-js";
+import { OnlineClient, RoomPanel, type RoomState } from "./network";
+const defaultHandling = { ...tuning };
 import { readRecords, improveRecord, recordKey, formatTime } from "./records";
 import { Simulation, tuning } from "./simulation";
 import {
@@ -37,7 +40,18 @@ class Race extends Phaser.Scene {
   panel?: Phaser.GameObjects.Container;
   debug?: Phaser.GameObjects.Container;
   keys!: Record<string, Phaser.Input.Keyboard.Key>;
-  state: "garage" | "countdown" | "race" | "pause" | "results" = "garage";
+  state: "garage" | "countdown" | "race" | "pause" | "results" | "lobby" =
+    "garage";
+  online?: OnlineClient;
+  roomPanel?: RoomPanel;
+  roomState?: RoomState;
+  playerId = 0;
+  networkRaceId = -1;
+  sendElapsed = 0;
+  pendingReset = false;
+  networkMessage = "";
+  networkText!: Phaser.GameObjects.Text;
+  kartLabels: Phaser.GameObjects.Text[] = [];
   accumulator = 0;
   countdown = 0;
   hudText!: Phaser.GameObjects.Text;
@@ -78,17 +92,25 @@ class Race extends Phaser.Scene {
         .image(k.body.position.x, k.body.position.y, `kart-${k.id}`)
         .setDepth(5),
     );
+    this.kartLabels = this.sprites.map(() =>
+      this.label(0, 0, "", 9).setOrigin(0.5).setDepth(6),
+    );
     this.cameras.main
       .setBounds(0, 0, WORLD.width, WORLD.height)
       .setRoundPixels(true);
     this.keys = this.input.keyboard!.addKeys(
-      "W,A,S,D,UP,DOWN,LEFT,RIGHT,SPACE,R,ESC,ENTER,F2",
+      "W,A,S,D,UP,DOWN,LEFT,RIGHT,SPACE,R,ESC,ENTER,F2,M",
     ) as typeof this.keys;
     this.input.keyboard!.addCapture(["SPACE", "UP", "DOWN", "LEFT", "RIGHT"]);
     this.hud = this.add.container(0, 0).setScrollFactor(0).setDepth(30);
     this.scale.on("resize", () => this.layout());
     this.layout();
     this.garage();
+    if (
+      new URLSearchParams(location.search).has("room") ||
+      new URLSearchParams(location.search).has("server")
+    )
+      this.openOnline();
     this.game.events.on("blur", () => {
       if (this.state === "race" || this.state === "countdown") this.pause();
     });
@@ -281,6 +303,10 @@ class Race extends Phaser.Scene {
     this.hud.add(this.label(16, h - 22, "ESC  PIT MENU", 10, "#ecedce"));
     this.countText = this.label(w / 2, h / 2 - 38, "", 52).setOrigin(0.5);
     this.hud.add(this.countText);
+    this.networkText = this.label(w / 2, h - 41, "", 10, "#f0d278").setOrigin(
+      0.5,
+    );
+    this.hud.add(this.networkText);
     this.map = this.add.graphics();
     this.hud.add(this.map);
     if (this.state === "garage") this.garage();
@@ -288,10 +314,10 @@ class Race extends Phaser.Scene {
     if (this.state === "results") this.results();
     if (this.debugOn) this.showDebug();
   }
-  board(title: string, subtitle: string) {
+  board(title: string, subtitle: string, height = 278) {
     this.panel?.destroy();
     const w = Math.min(414, this.scale.width - 24),
-      h = 278,
+      h = height,
       x = Math.round((this.scale.width - w) / 2),
       y = Math.round((this.scale.height - h) / 2);
     const p = this.add.container(x, y).setScrollFactor(0).setDepth(50);
@@ -348,11 +374,13 @@ class Race extends Phaser.Scene {
     this.button(
       p,
       123,
-      "START RACE                         ENTER",
+      "SOLO PRACTICE                      ENTER",
       () => this.start(),
       true,
     );
-    this.button(p, 161, "DRIVING SCHOOL", () => this.tutorial());
+    this.button(p, 161, "RACE WITH FRIENDS                      M", () =>
+      this.openOnline(),
+    );
     this.button(p, 199, "PIT SETUP", () => this.settings());
     p.add(
       this.label(
@@ -393,6 +421,9 @@ class Race extends Phaser.Scene {
     this.button(p, 230, "BACK TO GARAGE", () => this.garage(), true);
   }
   start() {
+    if (this.online) return;
+    this.playerId = 0;
+    this.sprites.forEach((s) => s.setVisible(true));
     this.sim.destroy();
     this.sim = new Simulation();
     this.marks.clear();
@@ -412,6 +443,19 @@ class Race extends Phaser.Scene {
     this.showPause();
   }
   showPause() {
+    if (this.online) {
+      this.online.input({ throttle: 0, steer: 0, drift: false });
+      const p = this.board(
+        "PIT MENU",
+        "ONLINE RACE CONTINUES WHILE THIS MENU IS OPEN",
+      );
+      this.button(p, 110, "BACK ON TRACK", () => this.resume(), true);
+      this.button(p, 160, "LEAVE ROOM", () => this.leaveOnline());
+      p.add(
+        this.label(25, 215, "WASD / ARROWS  ·  SPACE DRIFT  ·  R RESET", 10),
+      );
+      return;
+    }
     const p = this.board("IN THE PITS", "SESSION PAUSED");
     this.button(
       p,
@@ -443,37 +487,192 @@ class Race extends Phaser.Scene {
   results() {
     this.state = "results";
     const p = this.board(
-      "CHEQUERED FLAG",
-      `BEST LAP ${formatTime(Math.min(...this.sim.karts[0].lapTimes))}  /  PB ${formatTime(this.records.lap)}`,
+      "RACE PODIUM",
+      this.online
+        ? "FOUNDRY CIRCUIT / ROOM " + this.online.code
+        : "FOUNDRY CIRCUIT / SOLO PRACTICE",
+      348,
     );
-    this.sim
-      .positions()
-      .forEach((k, i) =>
-        p.add(
-          this.label(
-            25,
-            91 + i * 16,
-            `${i + 1}  ${names[k.id].padEnd(10)} ${k.finish ? formatTime(k.finish) : "RACING"}${k.id === 0 ? "  ◀" : ""}`,
-            12,
-            k.id === 0 ? "#f0d278" : "#e8e9cf",
-          ),
+    const order = this.online
+      ? this.roomState!.order.map((id) => this.sim.karts[id])
+      : this.sim.positions();
+    const finishers = order.filter((k) => k.finish > 0);
+    const name = (id: number) =>
+      this.online
+        ? this.roomState?.members.find((m) => m.kart === id)?.name || "Racer"
+        : names[id];
+    const g = this.add.graphics();
+    p.add(g);
+    for (const [rank, x, h] of [
+      [1, 29, 45],
+      [0, 151, 66],
+      [2, 273, 32],
+    ]) {
+      const kart = finishers[rank];
+      g.fillStyle([0xd6b655, 0xa8b4ad, 0xaf805a][rank]).fillRect(
+        x,
+        201 - h,
+        110,
+        h,
+      );
+      p.add(
+        this.label(x + 55, 205 - h, String(rank + 1), 22, "#233d32").setOrigin(
+          0.5,
+          0,
         ),
       );
-    p.add(
-      this.label(
-        25,
-        258,
-        `RACE PB ${formatTime(this.records.race)}${this.tunedSession ? "  /  TUNED SESSION" : ""}`,
-        9,
-      ),
+      if (kart) {
+        p.add(this.add.image(x + 55, 189 - h, `kart-${kart.id}`).setScale(1));
+        p.add(this.label(x + 55, 169 - h, name(kart.id), 10).setOrigin(0.5, 0));
+        p.add(
+          this.label(
+            x + 55,
+            185,
+            formatTime(kart.finish),
+            9,
+            "#233d32",
+          ).setOrigin(0.5, 0),
+        );
+      } else p.add(this.label(x + 55, 143 - h, "—", 14).setOrigin(0.5, 0));
+    }
+    order.forEach((k, i) => {
+      const x = 25 + (i >= 4 ? 187 : 0),
+        y = 216 + (i % 4) * 17;
+      p.add(
+        this.label(
+          x,
+          y,
+          `${i + 1} ${name(k.id).slice(0, 10).padEnd(10)} ${k.finish ? formatTime(k.finish) : this.online ? "DNF" : "RACING"}`,
+          9,
+          k.id === this.playerId ? "#f0d278" : "#edf0da",
+        ),
+      );
+    });
+    if (this.online) {
+      if (this.roomState?.hostId === this.online.id)
+        this.button(
+          p,
+          300,
+          "BACK TO LOBBY / RACE AGAIN",
+          () => this.online?.send({ type: "rematch" }),
+          true,
+        );
+      else this.button(p, 300, "LEAVE ROOM", () => this.leaveOnline(), true);
+    } else
+      this.button(
+        p,
+        300,
+        "RACE AGAIN                         ENTER",
+        () => this.start(),
+        true,
+      );
+  }
+  openOnline() {
+    Object.assign(tuning, defaultHandling);
+    this.debugOn = false;
+    this.debug?.destroy();
+    this.panel?.destroy();
+    this.panel = undefined;
+    this.state = "lobby";
+    this.networkRaceId = -1;
+    this.input.keyboard!.enabled = false;
+    this.online = new OnlineClient(
+      (state) => this.receiveRoom(state),
+      (message) => {
+        this.networkMessage = message;
+        if (this.roomPanel) this.roomPanel.status.textContent = message;
+      },
     );
-    this.button(
-      p,
-      224,
-      "RACE AGAIN                         ENTER",
-      () => this.start(),
-      true,
-    );
+    this.roomPanel = new RoomPanel(this.online, () => this.leaveOnline());
+    this.roomPanel.setup();
+  }
+  leaveOnline() {
+    this.online?.close();
+    this.online = undefined;
+    this.roomState = undefined;
+    this.roomPanel?.destroy();
+    this.roomPanel = undefined;
+    this.playerId = 0;
+    this.sim.destroy();
+    this.sim = new Simulation();
+    this.sprites.forEach((s) => s.setVisible(true));
+    this.kartLabels.forEach((t) => t.setVisible(false));
+    this.input.keyboard!.enabled = true;
+    this.networkMessage = "";
+    this.garage();
+  }
+  receiveRoom(state: RoomState) {
+    if (!this.online) return;
+    this.roomState = state;
+    const me = state.members.find((m) => m.id === this.online!.id);
+    if (!me) return;
+    if (state.phase === "lobby") {
+      this.state = "lobby";
+      this.panel?.destroy();
+      this.panel = undefined;
+      this.input.keyboard!.enabled = false;
+      this.roomPanel?.lobby(state);
+      return;
+    }
+    this.roomPanel?.hide();
+    this.input.keyboard!.enabled = true;
+    this.playerId = me.kart;
+    if (this.networkRaceId !== state.raceId) {
+      this.sim.destroy();
+      this.sim = new Simulation(
+        state.karts.length,
+        new Set(state.karts.map((k) => k.id)),
+      );
+      this.networkRaceId = state.raceId;
+      this.accumulator = 0;
+      this.marks.clear();
+      this.panel?.destroy();
+      this.panel = undefined;
+      this.sprites.forEach((sprite, i) =>
+        sprite.setVisible(i < state.karts.length),
+      );
+      this.kartLabels.forEach((label, i) =>
+        label.setVisible(i < state.karts.length),
+      );
+      const p = state.karts[this.playerId];
+      this.cameras.main.centerOn(p.x, p.y);
+      this.state = "countdown";
+    }
+    this.sim.time = state.time;
+    this.countdown = state.countdown;
+    for (const remote of state.karts) {
+      const k = this.sim.karts[remote.id];
+      Matter.Body.setStatic(k.body, remote.resetRemaining > 0);
+      Matter.Body.setPosition(k.body, { x: remote.x, y: remote.y });
+      Matter.Body.setVelocity(k.body, { x: remote.vx, y: remote.vy });
+      Matter.Body.setAngle(k.body, remote.angle);
+      Matter.Body.setAngularVelocity(k.body, remote.angular);
+      k.previousPosition = { x: remote.x, y: remote.y };
+      for (const key of [
+        "grip",
+        "lap",
+        "gates",
+        "nextGate",
+        "finish",
+        "lapStartedAt",
+        "resetRemaining",
+        "respawnGrace",
+        "draft",
+      ] as const)
+        k[key] = remote[key];
+      k.lapTimes = [...remote.lapTimes];
+      k.input = { ...remote.input };
+      const member = state.members.find((m) => m.kart === k.id);
+      k.body.isSensor =
+        remote.resetRemaining > 0 ||
+        !!remote.finish ||
+        !member?.connected ||
+        !!member?.dnf;
+    }
+    if (state.phase === "podium") {
+      if (this.state !== "results") this.results();
+    } else if (this.state !== "pause")
+      this.state = state.phase === "countdown" ? "countdown" : "race";
   }
   showDebug() {
     this.debug?.destroy();
@@ -531,23 +730,31 @@ class Race extends Phaser.Scene {
     const pressed = (k: string) => Phaser.Input.Keyboard.JustDown(this.keys[k]);
     if (
       pressed("ENTER") &&
+      !this.online &&
       (this.state === "garage" || this.state === "results")
     )
       this.start();
+    if (pressed("M") && this.state === "garage") this.openOnline();
     if (pressed("ESC")) {
       if (this.state === "race" || this.state === "countdown") this.pause();
       else if (this.state === "pause") this.resume();
     }
-    if (pressed("F2")) {
+    if (pressed("F2") && !this.online) {
       this.debugOn = !this.debugOn;
       this.showDebug();
     }
-    if (pressed("R") && this.state === "race")
-      this.sim.resetKart(this.sim.karts[0]);
+    if (pressed("R") && this.state === "race") {
+      if (this.online) this.pendingReset = true;
+      else this.sim.resetKart(this.sim.karts[0]);
+    }
     if (this.state === "countdown") {
-      this.countdown -= Math.min(delta, 100) / 1000;
+      if (!this.online) this.countdown -= Math.min(delta, 100) / 1000;
       this.countText.setText(
-        this.countdown > 0.6 ? String(Math.ceil(this.countdown - 0.6)) : "GO!",
+        this.online
+          ? String(Math.max(1, Math.ceil(this.countdown)))
+          : this.countdown > 0.6
+            ? String(Math.ceil(this.countdown - 0.6))
+            : "GO!",
       );
       if (this.countdown <= 0) {
         this.state = "race";
@@ -562,12 +769,29 @@ class Race extends Phaser.Scene {
         steer: (down("D", "RIGHT") ? 1 : 0) - (down("A", "LEFT") ? 1 : 0),
         drift: down("SPACE"),
       };
+      if (this.online) {
+        this.sendElapsed += delta;
+        if (this.sendElapsed >= 33 || this.pendingReset) {
+          this.online.input(input, this.pendingReset);
+          this.pendingReset = false;
+          this.sendElapsed = 0;
+        }
+      }
       while (this.accumulator >= 1000 / 60) {
-        this.sim.step(input);
+        if (this.online) {
+          const inputs = new Map(
+            this.sim.karts.map((k) => [
+              k.id,
+              k.id === this.playerId ? input : k.input,
+            ]),
+          );
+          if (this.online.connected && !this.sim.karts[this.playerId].finish)
+            this.sim.step(input, inputs);
+        } else this.sim.step(input);
         this.accumulator -= 1000 / 60;
       }
-      const kart = this.sim.karts[0];
-      if (kart.lapTimes.length > this.recordedLaps) {
+      const kart = this.sim.karts[this.playerId];
+      if (!this.online && kart.lapTimes.length > this.recordedLaps) {
         const last = kart.lapTimes.at(-1)!;
         const pb =
           !this.tunedSession &&
@@ -586,18 +810,46 @@ class Race extends Phaser.Scene {
           }
         }
       }
-      if (kart.finish) this.results();
+      if (kart.finish && !this.online) this.results();
     }
-    const player = this.sim.karts[0],
+    if (this.online && this.state === "pause") {
+      this.sendElapsed += delta;
+      if (this.sendElapsed > 100) {
+        this.online.input({ throttle: 0, steer: 0, drift: false });
+        this.sendElapsed = 0;
+      }
+    }
+    const player = this.sim.karts[this.playerId] || this.sim.karts[0],
       b = player.body;
     this.effects.clear();
     this.trails.clear();
     for (const k of this.sim.karts) {
       const s = this.sprites[k.id];
+      const snap =
+        !this.online ||
+        Math.hypot(s.x - k.body.position.x, s.y - k.body.position.y) > 120;
+      const alpha = 1 - Math.exp(-Math.min(delta, 100) / 30);
       s.setPosition(
-        Math.round(k.body.position.x),
-        Math.round(k.body.position.y),
+        Math.round(
+          snap
+            ? k.body.position.x
+            : Phaser.Math.Linear(s.x, k.body.position.x, alpha),
+        ),
+        Math.round(
+          snap
+            ? k.body.position.y
+            : Phaser.Math.Linear(s.y, k.body.position.y, alpha),
+        ),
       ).setRotation(k.body.angle);
+      const member = this.roomState?.members.find((m) => m.kart === k.id);
+      this.kartLabels[k.id]
+        .setVisible(!!this.online && !!member)
+        .setPosition(s.x, s.y - 21)
+        .setText(
+          member
+            ? `${member.name}${k.id === this.playerId ? " · YOU" : ""}${!member.connected ? " · OFFLINE" : ""}`
+            : "",
+        );
       const speed = Math.hypot(k.body.velocity.x, k.body.velocity.y);
       if (this.state === "race" && speed > 2.8 && !k.resetRemaining) {
         const fx = Math.cos(k.body.angle),
@@ -681,15 +933,25 @@ class Race extends Phaser.Scene {
     } else this.countText.setFontSize(52);
     this.sprites.forEach((sprite, i) =>
       sprite.setAlpha(
-        this.sim.karts[i].resetRemaining > 0 ||
-          this.sim.karts[i].respawnGrace > 0
+        (this.sim.karts[i]?.resetRemaining ?? 0) > 0 ||
+          (this.sim.karts[i]?.respawnGrace ?? 0) > 0
           ? 0.45
           : 1,
       ),
     );
-    const pos = this.sim.positions().findIndex((k) => k.id === 0) + 1;
+    const pos = this.online
+      ? (this.roomState?.order.indexOf(this.playerId) ?? 0) + 1
+      : this.sim.positions().findIndex((k) => k.id === 0) + 1;
+    this.networkText.setText(
+      this.online
+        ? this.networkMessage ||
+            (player.finish
+              ? "FINISHED — WAITING FOR THE PODIUM"
+              : `ROOM ${this.online.code}  /  ${this.online.latency}ms${this.roomState?.finishRemaining !== null && this.roomState?.finishRemaining !== undefined ? "  /  FINISH IN " + Math.ceil(this.roomState.finishRemaining) + "s" : ""}`)
+        : "",
+    );
     this.hudText.setText(
-      `P${pos} / 8     LAP ${Math.min(3, player.lap + 1)} / 3\n${this.sim.time.toFixed(1).padStart(5, "0")}   FOUNDRY CIRCUIT`,
+      `P${pos} / ${this.sim.karts.length}     LAP ${Math.min(3, player.lap + 1)} / 3\n${this.sim.time.toFixed(1).padStart(5, "0")}   FOUNDRY CIRCUIT`,
     );
     this.timingText.setText(
       `LAP  ${formatTime(player.finish ? player.lapTimes.at(-1)! : this.sim.time - player.lapStartedAt)}\nLAST ${formatTime(player.lapTimes.at(-1) ?? null)}\nPB   ${formatTime(this.records.lap)}${this.tunedSession ? " *" : ""}`,
@@ -719,8 +981,8 @@ class Race extends Phaser.Scene {
         .fillRect(
           mx + k.body.position.x * scale - 1,
           my + k.body.position.y * scale - 1,
-          k.id ? 2 : 4,
-          k.id ? 2 : 4,
+          k.id !== this.playerId ? 2 : 4,
+          k.id !== this.playerId ? 2 : 4,
         );
   }
 }

@@ -15,7 +15,7 @@ Controls are available on the in-game Driving School board. W/arrow up accelerat
 
 ## Prototype scope
 
-Original circuit geometry follows the supplied layout reference. Broad roads, small rotating procedural kart placeholders, integer display scaling and a north-up following camera establish the intended scale. Production artwork should move into Aseprite and track assembly into Tiled after handling is approved. The editable Tiled map lives in `assets/tracks/foundry.json`; `src/track.ts` derives road and wall geometry from it; no reference artwork is shipped. No networking or audio yet.
+Original circuit geometry follows the supplied layout reference. Broad roads, small rotating procedural kart placeholders, integer display scaling and a north-up following camera establish the intended scale. Production artwork should move into Aseprite and track assembly into Tiled after handling is approved. The editable Tiled map lives in `assets/tracks/foundry.json`; `src/track.ts` derives road and wall geometry from it; no reference artwork is shipped. Online rooms use the bundled PC WebSocket server; audio is not implemented.
 
 `src/simulation.ts` owns physics, bot inputs, recovery, ordered gates and race state independently from Phaser. `src/main.ts` owns rendering, keyboard input and in-game menus. R moves a kart 100 world pixels back along the circuit and holds it for 1.5 seconds while the race continues, without awarding checkpoints. The same penalty applies to automatic bot recovery. Recovering karts are ghosted during the hold, then ignore kart contact for one second while wall collision remains active. Continuous concrete barriers use flush joined collision geometry. The grid and timing gates share a start line at the middle of the southern straight. Engine power tapers towards a configurable top speed. Three laps require passing all ordered gates.
 
@@ -32,3 +32,7 @@ Open `assets/tracks/foundry.json` in Tiled as a map. Edit the **Racing line** po
 ## Hosting
 
 See [HOSTING.md](HOSTING.md) for hosted deployment updates and running the production build on a Windows PC or local network. `npm run check` verifies a release; `npm run serve:lan` serves the built `dist/` folder to the local network. GitHub Actions also verifies and archives builds on pushes to main.
+
+## Multiplayer
+
+See [MULTIPLAYER.md](MULTIPLAYER.md) for PC hosting, room invites, ready checks, reconnects and the podium. Run `npm run build` then `npm run multiplayer` to serve the game and multiplayer on port 8080. Online races support 2–8 humans; solo practice retains bots.

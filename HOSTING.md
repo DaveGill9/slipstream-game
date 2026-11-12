@@ -1,6 +1,6 @@
 # Slipstream hosting
 
-The hosted game is a static browser build, published through Sites. Anyone with the public link can play. There is no multiplayer connection yet: each browser runs its own race, and personal bests stay in that browser.
+The hosted game is a static browser build, published through Sites. Anyone with the public link can play. Solo practice runs independently in each browser. Online rooms connect to the host PC through the server address in the invite link; see MULTIPLAYER.md. Personal bests stay in that browser.
 
 ## Update the hosted game
 

@@ -22,3 +22,12 @@ jobs:
         with:
           name: slipstream-browser-build
           path: dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: slipstream-multiplayer-pc
+          path: |
+            dist/
+            server-dist/
+            scripts/start-online.mjs
+            Start-Multiplayer.cmd
+            MULTIPLAYER.md

@@ -26,6 +26,86 @@
         height: 100%;
       }
     </style>
+    <style>
+      .room-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: grid;
+        place-items: center;
+        background: #122d2990;
+        font: bold 13px monospace;
+        color: #edf0da;
+      }
+      .room-board {
+        width: min(430px, 94vw);
+        max-height: 94vh;
+        overflow: auto;
+        background: #263e35;
+        border: 5px solid #c5bea0;
+        border-top: 8px solid #e3c66a;
+        box-shadow: 6px 6px #172f2b;
+        padding: 22px;
+      }
+      .room-board h1 {
+        font-size: 24px;
+        color: #f0d278;
+        margin: 0 0 16px;
+      }
+      .room-board h2 {
+        letter-spacing: 3px;
+      }
+      .room-board label {
+        display: block;
+        margin: 12px 0;
+      }
+      .room-board input {
+        display: block;
+        width: 100%;
+        padding: 10px;
+        margin-top: 6px;
+        background: #193129;
+        color: #edf0da;
+        border: 1px solid #8a9c83;
+        font: inherit;
+      }
+      .room-board button {
+        display: block;
+        width: 100%;
+        margin: 10px 0 0;
+        padding: 11px;
+        border: 0;
+        background: #e3c66a;
+        color: #233d32;
+        font: inherit;
+        cursor: pointer;
+      }
+      .room-board button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      .room-board .room-back {
+        background: #365346;
+        color: #edf0da;
+      }
+      .room-board ul {
+        padding: 0;
+        list-style: none;
+      }
+      .room-board li {
+        padding: 6px 0;
+        border-bottom: 1px solid #50624e;
+      }
+      .room-status {
+        color: #f0d278;
+        line-height: 1.5;
+      }
+      .room-hint {
+        font-size: 11px;
+        line-height: 1.6;
+        color: #aebb9d;
+      }
+    </style>
   </head>
   <body>
     <div id="game"></div>
