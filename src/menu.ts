@@ -18,12 +18,6 @@ export class Menu {
     this.root.style.display = "none";
     this.root.append(this.board);
     document.body.append(this.root);
-    // The game captures arrow keys and Space for driving, which would stop
-    // them from moving a focused slider. Keep those key presses in the menu.
-    this.root.addEventListener("keydown", (event) => {
-      if (event.target instanceof HTMLInputElement && event.key !== "Escape")
-        event.stopPropagation();
-    });
   }
   get isOpen() {
     return this.root.style.display !== "none";

@@ -6,6 +6,20 @@ import { Menu } from "./menu";
 const defaultHandling = { ...tuning };
 const audio = new GameAudio();
 const menu = new Menu();
+// Phaser listens for keys on the whole window and blocks the browser's
+// default for driving keys (WASD, arrows, Space...), even while the game is
+// paused. That made those letters impossible to type into the lobby's name
+// and address boxes. Key presses inside a form field stop here instead, so
+// they type normally and never reach the game. Escape still gets through.
+for (const type of ["keydown", "keyup"] as const)
+  document.addEventListener(type, (event) => {
+    const field = event.target as HTMLElement;
+    if (
+      event.key !== "Escape" &&
+      field.matches?.("input, textarea, select, [contenteditable]")
+    )
+      event.stopPropagation();
+  });
 // Every HTML menu and lobby button gets the same click sound.
 document.addEventListener("click", (event) => {
   if ((event.target as Element).closest?.(".room-board button")) audio.click();
@@ -33,8 +47,15 @@ const names = [
 // quickly a correction is blended away.
 const MAX_REPLAY_STEPS = 20;
 const SMOOTHING_MS = 150;
-const pixelScale = () =>
-  Math.max(1, Math.floor(Math.min(innerWidth / 640, innerHeight / 360)));
+// Every screen shows the same height of track, so nobody gets a closer or
+// wider view than anyone else. The old whole-number zoom jumped between
+// steps: a window just under 1440 px tall saw 20% more track than one just
+// over it, which made big 4K screens look zoomed in. Wider screens still see
+// a little more to the sides, as in most games.
+const VIEW_HEIGHT = 432;
+const pixelScale = () => Math.max(0.5, innerHeight / VIEW_HEIGHT);
+// HTML menus grow with the window too, so they are not tiny on 4K screens.
+const menuScale = () => Math.min(2.5, Math.max(1, innerHeight / 1100));
 class Race extends Phaser.Scene {
   sim!: Simulation;
   sprites: Phaser.GameObjects.Image[] = [];
@@ -780,6 +801,7 @@ class Race extends Phaser.Scene {
         state.karts.length,
         new Set(state.karts.map((k) => k.id)),
         this.track,
+        state.laps,
       );
       this.networkRaceId = state.raceId;
       this.accumulator = 0;
@@ -1196,7 +1218,7 @@ class Race extends Phaser.Scene {
         : "",
     );
     this.hudText.setText(
-      `P${pos} / ${this.sim.karts.length}     LAP ${Math.min(LAPS, player.lap + 1)} / ${LAPS}\n${this.sim.time.toFixed(1).padStart(5, "0")}   ${this.track.name}`,
+      `P${pos} / ${this.sim.karts.length}     LAP ${Math.min(this.sim.laps, player.lap + 1)} / ${this.sim.laps}\n${this.sim.time.toFixed(1).padStart(5, "0")}   ${this.track.name}`,
     );
     this.timingText.setText(
       `LAP  ${formatTime(player.finish ? player.lapTimes.at(-1)! : this.sim.time - player.lapStartedAt)}\nLAST ${formatTime(player.lapTimes.at(-1) ?? null)}\nPB   ${formatTime(this.records.lap)}${this.tunedSession ? " *" : ""}`,
@@ -1233,7 +1255,7 @@ class Race extends Phaser.Scene {
         );
   }
 }
-// Integer pixel scaling goes through Phaser's own zoom so its pointer
+// Pixel scaling goes through Phaser's own zoom so its pointer
 // mapping matches the enlarged canvas (setting the canvas CSS size directly
 // left mouse clicks landing 2-3x away from where the cursor was).
 const game = new Phaser.Game({
@@ -1256,6 +1278,7 @@ function resize() {
   game.scale.resize(Math.ceil(innerWidth / s), Math.ceil(innerHeight / s));
   // setZoom refreshes the canvas CSS size and pointer scale for the new size.
   game.scale.setZoom(s);
+  document.documentElement.style.setProperty("--ui-zoom", String(menuScale()));
 }
 game.canvas.style.outline = "none";
 game.canvas.tabIndex = 0;

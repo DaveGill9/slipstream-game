@@ -28,8 +28,15 @@ test("rooms require two ready players and host permission; inputs control distin
   assert.equal(room.snapshot().track, "foundry");
   room.message(a, { type: "track", track: "overpass" });
   assert.equal(room.snapshot().track, "overpass");
+  assert.throws(() => room.message(b, { type: "laps", laps: 3 }), /host/);
+  for (const bad of [0, 11, 2.5, "4"])
+    room.message(a, { type: "laps", laps: bad });
+  assert.equal(room.snapshot().laps, 6);
+  room.message(a, { type: "laps", laps: 3 });
+  assert.equal(room.snapshot().laps, 3);
   start(room, a, b);
   assert.equal(room.sim.track.id, "overpass");
+  assert.equal(room.sim.laps, 3);
   assert.equal(room.phase, "racing");
   assert.equal(room.sim.karts.length, 2);
   const before = room.sim.karts.map((k) => k.body.position.x);

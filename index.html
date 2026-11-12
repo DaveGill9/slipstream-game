@@ -38,8 +38,10 @@
         color: #edf0da;
       }
       .room-board {
-        width: min(430px, 94vw);
-        max-height: 94vh;
+        /* --ui-zoom is set from the window size in src/main.ts. */
+        zoom: var(--ui-zoom, 1);
+        width: min(430px, calc(94vw / var(--ui-zoom, 1)));
+        max-height: calc(94vh / var(--ui-zoom, 1));
         overflow: auto;
         background: #263e35;
         border: 5px solid #c5bea0;
@@ -58,6 +60,17 @@
       .room-board label {
         display: block;
         margin: 12px 0;
+      }
+      .room-board label:has(select),
+      .room-board label:has(.room-track) {
+        display: inline-block;
+        width: calc(50% - 6px);
+      }
+      .room-board label:has(select) + label {
+        margin-left: 12px;
+      }
+      .room-board label:has(.room-track) + label {
+        margin-left: 12px;
       }
       .room-board input,
       .room-board select {

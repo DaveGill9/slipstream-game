@@ -1,6 +1,8 @@
 import Matter from "matter-js";
 import { angleDiff, defaultTrack, type Track } from "./track";
+/** Default race distance; online hosts can pick 1 to MAX_LAPS. */
 export const LAPS = 6;
+export const MAX_LAPS = 10;
 // Collision categories. Where the road crosses itself, karts and walls on
 // the bridge ignore the ones underneath it, and the other way round.
 const WALL = 1,
@@ -16,9 +18,9 @@ export interface Input {
 }
 export const tuning = {
   acceleration: 0.00038,
-  // Engine taper limit. With on-road drag, 11.52 gives a 100 km/h top speed
-  // on the HUD (7.95 gave 80 km/h).
-  topSpeed: 11.52,
+  // Engine taper limit. With on-road drag, 7.95 gives an 80 km/h top speed
+  // on the HUD (11.52 gives 100 km/h).
+  topSpeed: 7.95,
   braking: 0.0009,
   steering: 0.042,
   grip: 0.2,
@@ -72,6 +74,7 @@ export class Simulation {
     public count = 8,
     public humans = new Set([0]),
     public track: Track = defaultTrack,
+    public laps = LAPS,
   ) {
     const { points, wallVertices, gridPosition } = track;
     for (let side of [-1, 1])
@@ -295,7 +298,7 @@ export class Simulation {
           k.lap++;
           k.lapTimes.push(this.time - k.lapStartedAt);
           k.lapStartedAt = this.time;
-          if (k.lap === LAPS && !k.finish) k.finish = this.time;
+          if (k.lap === this.laps && !k.finish) k.finish = this.time;
         }
       }
       k.previousPosition = { ...b.position };

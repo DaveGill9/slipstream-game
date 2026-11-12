@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import Matter from "matter-js";
-import { Simulation } from "../src/simulation.ts";
+import { Simulation, LAPS, MAX_LAPS } from "../src/simulation.ts";
 import { tracks, defaultTrack } from "../src/track.ts";
 const idle = () => ({ throttle: 0, steer: 0, drift: false });
 const round = (value, scale) => Math.round(value * scale) / scale;
@@ -10,6 +10,7 @@ export class Room {
     this.members = [];
     this.phase = "lobby";
     this.track = defaultTrack.id;
+    this.laps = LAPS;
     this.hostId = "";
     this.sim = null;
     this.countdown = 0;
@@ -96,6 +97,19 @@ export class Room {
       if (this.phase !== "lobby" || !Object.hasOwn(tracks, data.track)) return;
       this.track = data.track;
       this.broadcast();
+    } else if (data.type === "laps") {
+      if (m.id !== this.hostId)
+        throw Error("Only the room host picks the race distance.");
+      const laps = data.laps;
+      if (
+        this.phase !== "lobby" ||
+        !Number.isInteger(laps) ||
+        laps < 1 ||
+        laps > MAX_LAPS
+      )
+        return;
+      this.laps = laps;
+      this.broadcast();
     } else if (data.type === "start") {
       if (m.id !== this.hostId) throw Error("Only the room host can start.");
       if (
@@ -109,6 +123,7 @@ export class Room {
         this.members.length,
         new Set(this.members.map((_, i) => i)),
         tracks[this.track],
+        this.laps,
       );
       this.members.forEach((p, i) => {
         p.kart = i;
@@ -185,7 +200,8 @@ export class Room {
       if (
         this.members.every((m) => m.dnf || this.sim.karts[m.kart].finish) ||
         this.sim.time >= this.endAt ||
-        this.sim.time >= 600
+        // Hard stop so an abandoned room cannot race forever.
+        this.sim.time >= 120 + this.laps * 90
       ) {
         for (const m of this.members)
           if (!this.sim.karts[m.kart].finish) m.dnf = true;
@@ -201,6 +217,7 @@ export class Room {
       hostId: this.hostId,
       phase: this.phase,
       track: this.track,
+      laps: this.laps,
       countdown: this.countdown,
       raceId: this.raceId,
       time: this.sim?.time || 0,

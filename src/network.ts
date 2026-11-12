@@ -1,5 +1,6 @@
 import type { Input } from "./simulation";
 import { tracks } from "./track";
+import { MAX_LAPS } from "./simulation";
 export interface NetKart {
   id: number;
   x: number;
@@ -36,6 +37,7 @@ export interface RoomState {
   hostId: string;
   phase: "lobby" | "countdown" | "racing" | "podium";
   track: string;
+  laps: number;
   countdown: number;
   raceId: number;
   time: number;
@@ -261,24 +263,45 @@ export class RoomPanel {
       row.textContent = `${member.name}${member.id === this.client.id ? " (YOU)" : ""}${member.id === state.hostId ? " · HOST" : ""} — ${member.connected ? (member.ready ? "READY" : "GETTING READY") : "RECONNECTING"}`;
       list.append(row);
     }
-    // The host chooses the circuit; everyone else sees the choice.
-    const row = document.createElement("label");
-    row.textContent = "TRACK";
-    if (state.hostId === this.client.id) {
-      const select = document.createElement("select");
-      for (const track of Object.values(tracks))
-        select.add(new Option(track.name, track.id));
-      select.value = state.track;
-      select.onchange = () =>
-        this.client.send({ type: "track", track: select.value });
-      row.append(select);
-    } else {
-      const chosen = document.createElement("strong");
-      chosen.className = "room-track";
-      chosen.textContent = tracks[state.track]?.name ?? state.track;
-      row.append(chosen);
-    }
-    this.body.append(row);
+    // The host chooses the circuit and distance; everyone else sees them.
+    const isHost = state.hostId === this.client.id;
+    const setting = (
+      label: string,
+      options: [string, string][],
+      value: string,
+      change: (value: string) => void,
+    ) => {
+      const row = document.createElement("label");
+      row.textContent = label;
+      if (isHost) {
+        const select = document.createElement("select");
+        for (const [id, text] of options) select.add(new Option(text, id));
+        select.value = value;
+        select.onchange = () => change(select.value);
+        row.append(select);
+      } else {
+        const chosen = document.createElement("strong");
+        chosen.className = "room-track";
+        chosen.textContent = options.find(([id]) => id === value)?.[1] ?? value;
+        row.append(chosen);
+      }
+      this.body.append(row);
+    };
+    setting(
+      "TRACK",
+      Object.values(tracks).map((t) => [t.id, t.name]),
+      state.track,
+      (track) => this.client.send({ type: "track", track }),
+    );
+    setting(
+      "LAPS",
+      Array.from({ length: MAX_LAPS }, (_, i) => [
+        String(i + 1),
+        `${i + 1} LAP${i ? "S" : ""}`,
+      ]),
+      String(state.laps),
+      (laps) => this.client.send({ type: "laps", laps: Number(laps) }),
+    );
     this.body.append(list);
     const me = state.members.find((m) => m.id === this.client.id);
     const button = (text: string, fn: () => void) => {
