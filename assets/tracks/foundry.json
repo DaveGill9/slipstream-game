@@ -1,0 +1,308 @@
+{
+  "type": "map",
+  "version": "1.10",
+  "tiledversion": "1.11.0",
+  "orientation": "orthogonal",
+  "renderorder": "right-down",
+  "width": 157,
+  "height": 98,
+  "tilewidth": 16,
+  "tileheight": 16,
+  "infinite": false,
+  "nextlayerid": 4,
+  "nextobjectid": 6,
+  "layers": [
+    {
+      "id": 1,
+      "name": "Racing line",
+      "type": "objectgroup",
+      "opacity": 1,
+      "visible": true,
+      "x": 0,
+      "y": 0,
+      "draworder": "topdown",
+      "objects": [
+        {
+          "id": 1,
+          "name": "Centreline",
+          "type": "",
+          "rotation": 0,
+          "visible": true,
+          "x": 0,
+          "y": 0,
+          "width": 0,
+          "height": 0,
+          "polyline": [
+            {
+              "x": 650,
+              "y": 1330
+            },
+            {
+              "x": 1100,
+              "y": 1330
+            },
+            {
+              "x": 1530,
+              "y": 1330
+            },
+            {
+              "x": 1960,
+              "y": 1330
+            },
+            {
+              "x": 2110,
+              "y": 1220
+            },
+            {
+              "x": 2280,
+              "y": 1040
+            },
+            {
+              "x": 2280,
+              "y": 880
+            },
+            {
+              "x": 2190,
+              "y": 830
+            },
+            {
+              "x": 1990,
+              "y": 900
+            },
+            {
+              "x": 1790,
+              "y": 990
+            },
+            {
+              "x": 1660,
+              "y": 970
+            },
+            {
+              "x": 1550,
+              "y": 880
+            },
+            {
+              "x": 1580,
+              "y": 780
+            },
+            {
+              "x": 1690,
+              "y": 710
+            },
+            {
+              "x": 1900,
+              "y": 735
+            },
+            {
+              "x": 2040,
+              "y": 680
+            },
+            {
+              "x": 2140,
+              "y": 570
+            },
+            {
+              "x": 2080,
+              "y": 460
+            },
+            {
+              "x": 1920,
+              "y": 320
+            },
+            {
+              "x": 1800,
+              "y": 210
+            },
+            {
+              "x": 1690,
+              "y": 220
+            },
+            {
+              "x": 1440,
+              "y": 340
+            },
+            {
+              "x": 1180,
+              "y": 455
+            },
+            {
+              "x": 1060,
+              "y": 540
+            },
+            {
+              "x": 1020,
+              "y": 700
+            },
+            {
+              "x": 1100,
+              "y": 790
+            },
+            {
+              "x": 1180,
+              "y": 870
+            },
+            {
+              "x": 1160,
+              "y": 970
+            },
+            {
+              "x": 1060,
+              "y": 1010
+            },
+            {
+              "x": 890,
+              "y": 960
+            },
+            {
+              "x": 800,
+              "y": 890
+            },
+            {
+              "x": 780,
+              "y": 690
+            },
+            {
+              "x": 760,
+              "y": 490
+            },
+            {
+              "x": 680,
+              "y": 430
+            },
+            {
+              "x": 460,
+              "y": 340
+            },
+            {
+              "x": 350,
+              "y": 340
+            },
+            {
+              "x": 260,
+              "y": 450
+            },
+            {
+              "x": 245,
+              "y": 540
+            },
+            {
+              "x": 330,
+              "y": 640
+            },
+            {
+              "x": 465,
+              "y": 770
+            },
+            {
+              "x": 480,
+              "y": 870
+            },
+            {
+              "x": 380,
+              "y": 970
+            },
+            {
+              "x": 310,
+              "y": 1050
+            },
+            {
+              "x": 325,
+              "y": 1140
+            },
+            {
+              "x": 460,
+              "y": 1270
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "Timing",
+      "type": "objectgroup",
+      "opacity": 1,
+      "visible": true,
+      "x": 0,
+      "y": 0,
+      "draworder": "topdown",
+      "objects": [
+        {
+          "id": 2,
+          "name": "Start / finish",
+          "type": "",
+          "rotation": 0,
+          "visible": true,
+          "x": 1360,
+          "y": 1330,
+          "width": 0,
+          "height": 0,
+          "point": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "Grandstands",
+      "type": "objectgroup",
+      "opacity": 1,
+      "visible": true,
+      "x": 0,
+      "y": 0,
+      "draworder": "topdown",
+      "objects": [
+        {
+          "id": 3,
+          "name": "Grandstand",
+          "type": "",
+          "rotation": 0,
+          "visible": true,
+          "x": 790,
+          "y": 1450,
+          "width": 380,
+          "height": 58
+        },
+        {
+          "id": 4,
+          "name": "Grandstand",
+          "type": "",
+          "rotation": 0,
+          "visible": true,
+          "x": 1240,
+          "y": 1150,
+          "width": 280,
+          "height": 65
+        },
+        {
+          "id": 5,
+          "name": "Grandstand",
+          "type": "",
+          "rotation": 0,
+          "visible": true,
+          "x": 100,
+          "y": 100,
+          "width": 270,
+          "height": 60
+        }
+      ]
+    }
+  ],
+  "tilesets": [],
+  "properties": [
+    {
+      "name": "roadWidth",
+      "type": "int",
+      "value": 132
+    },
+    {
+      "name": "worldWidth",
+      "type": "int",
+      "value": 2500
+    },
+    {
+      "name": "worldHeight",
+      "type": "int",
+      "value": 1560
+    }
+  ]
+}
