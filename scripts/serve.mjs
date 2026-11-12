@@ -14,6 +14,7 @@ const types = {
   ".svg": "image/svg+xml",
   ".ico": "image/x-icon",
   ".woff2": "font/woff2",
+  ".ogg": "audio/ogg",
 };
 export function makeServer(directory = root) {
   return createServer(async (req, res) => {
@@ -47,7 +48,8 @@ export function makeServer(directory = root) {
         "Content-Type": types[extname(canonical)] || "application/octet-stream",
         "Content-Length": info.size,
         "X-Content-Type-Options": "nosniff",
-        "Cache-Control": path.startsWith("assets/")
+        // Windows gives the relative path with backslashes.
+        "Cache-Control": path.replaceAll("\\", "/").startsWith("assets/")
           ? "public, max-age=31536000, immutable"
           : "no-cache",
       });

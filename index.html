@@ -105,6 +105,92 @@
         line-height: 1.6;
         color: #aebb9d;
       }
+      /* Garage, settings and pit menus (src/menu.ts). */
+      .room-board h1:has(+ .menu-sub) {
+        font-size: 30px;
+        letter-spacing: 2px;
+        margin-bottom: 6px;
+      }
+      .menu-sub {
+        margin: 0 0 18px;
+        font-size: 11px;
+        letter-spacing: 1px;
+        color: #aebb9d;
+      }
+      .room-board .menu-button {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        text-align: left;
+        padding: 12px 14px;
+      }
+      .room-board button:hover:not(:disabled) {
+        filter: brightness(1.12);
+      }
+      .room-board button:focus-visible,
+      .room-board input:focus-visible {
+        outline: 2px solid #edf0da;
+        outline-offset: 2px;
+      }
+      .menu-key {
+        opacity: 0.65;
+      }
+      .room-board h3 {
+        margin: 20px 0 10px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid #50624e;
+        font-size: 12px;
+        letter-spacing: 3px;
+        color: #f0d278;
+      }
+      .room-board .menu-row {
+        display: grid;
+        grid-template-columns: 76px 1fr 42px;
+        align-items: center;
+        gap: 12px;
+        margin: 10px 0;
+      }
+      .menu-value {
+        text-align: right;
+        color: #aebb9d;
+      }
+      .room-board input[type="range"],
+      .room-board input[type="checkbox"] {
+        width: auto;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        background: none;
+        accent-color: #e3c66a;
+        cursor: pointer;
+      }
+      .room-board input[type="range"] {
+        width: 100%;
+      }
+      .room-board .menu-check {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 12px 0 0;
+        cursor: pointer;
+      }
+      .room-board input[type="checkbox"] {
+        width: 16px;
+        height: 16px;
+      }
+      .menu-keys {
+        display: grid;
+        grid-template-columns: 96px 1fr;
+        gap: 7px 12px;
+        margin: 0 0 8px;
+        font-size: 12px;
+      }
+      .menu-keys dt {
+        color: #f0d278;
+      }
+      .menu-keys dd {
+        margin: 0;
+      }
     </style>
   </head>
   <body>

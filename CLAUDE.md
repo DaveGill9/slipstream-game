@@ -13,6 +13,8 @@ Overhead kart-racing game (Phaser + TypeScript, Matter.js physics) played online
 - `src/simulation.ts`: physics, bots, laps (shared by client and server). `tuning.topSpeed = 7.95` gives 80 km/h on the HUD (HUD km/h = speed × 13).
 - `src/main.ts`: Phaser scene, menus, HUD, online client logic.
 - `src/network.ts`: WebSocket client and the lobby DOM panel.
+- `src/menu.ts`: HTML garage / settings / pit menus (same `.room-board` styling as the lobby, in `index.html`). Only the podium is still drawn on the pixel canvas.
+- `src/audio.ts`: Web Audio. Sound effects are synthesised in code; music is the CC0 loop in `assets/music/` (see `CREDITS.md` there). Volumes are saved in localStorage under `slipstream-audio`.
 - `server/rooms.mjs`, `server/index.mjs`: authoritative room server (60 Hz physics, ~20 Hz snapshots).
 - `scripts/start-online.mjs`: launcher (port fallback, auto-rebuild, cloudflared download and tunnel).
 
