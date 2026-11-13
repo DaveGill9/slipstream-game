@@ -2,13 +2,14 @@ import Matter from "matter-js";
 import { angleDiff, defaultTrack, PAD, type Track } from "./track";
 /**
  * Boosts. Driving over a pad gives `pad` seconds of boost. Holding a slide
- * (Space + steering, at speed, on the road) charges a drift boost: release
- * after `driftLevels[0]` seconds for a small kick, or after
- * `driftLevels[1]` for a bigger one.
+ * (Space + steering one way, at speed, on the road) charges a drift boost:
+ * release after `driftLevels[0]` seconds for a small kick, or after
+ * `driftLevels[1]` for a bigger one. Switching steering direction mid-slide
+ * starts the charge again, so weaving down a straight earns nothing.
  */
 export const BOOST = {
   pad: 1,
-  driftLevels: [0.8, 1.6],
+  driftLevels: [0.5, 1],
   driftBoost: [0.45, 0.85],
   /** Extra push while boosting, as a multiple of normal acceleration.
    * 1 takes a kart from 80 to about 100 km/h on a straight. */
@@ -26,6 +27,29 @@ export const driftLevel = (k: { driftCharge: number }) =>
 /** Default race distance; online hosts can pick 1 to MAX_LAPS. */
 export const LAPS = 6;
 export const MAX_LAPS = 10;
+/** Most karts on one grid (online rooms; solo practice uses 8). */
+export const MAX_KARTS = 10;
+/** Room leaderboard: points for a win. Each place below scores one less. */
+export const WIN_POINTS = 10;
+/** Bonus for the fastest single lap of the race. */
+export const FASTEST_LAP_POINTS = 1;
+/** Championship lengths a host can pick: 0 is free play (no end). */
+export const SERIES = [0, 3, 5];
+/**
+ * Catch-up help (online rooms only, so solo lap records stay fair). A kart
+ * more than `from` px of track behind the leader gets a little more top
+ * speed and power and a longer pad boost, growing to the full amounts at
+ * `fullAt` px behind. Nobody has to do anything: it just keeps races close.
+ */
+export const CATCH_UP = {
+  from: 150,
+  fullAt: 1500,
+  /** Extra top speed at full help: 0.08 is 80 to about 86 km/h. */
+  topSpeed: 0.08,
+  power: 0.2,
+  /** Extra pad boost time at full help: 0.6 makes 1 s into 1.6 s. */
+  padBoost: 0.6,
+};
 // Collision categories. Where the road crosses itself, karts and walls on
 // the bridge ignore the ones underneath it, and the other way round.
 const WALL = 1,
@@ -66,10 +90,14 @@ export class Kart {
   resetCount = 0;
   respawnGrace = 0;
   draft = 0;
+  /** Catch-up help in use, 0 (none) to 1 (full); see CATCH_UP. */
+  help = 0;
   /** Seconds of boost left. */
   boost = 0;
   /** Seconds the current slide has been charging a drift boost. */
   driftCharge = 0;
+  /** Steering direction of the current slide: -1 left, 1 right, 0 none. */
+  driftDir = 0;
   /** Centreline segment the kart is on; keeps it on its own stretch of
    * road where the track crosses itself. */
   segment = 0;
@@ -102,6 +130,8 @@ export class Simulation {
     public humans = new Set([0]),
     public track: Track = defaultTrack,
     public laps = LAPS,
+    /** Give karts behind the leader a little help (see CATCH_UP). */
+    public catchUp = false,
   ) {
     const { points, wallVertices, gridPosition } = track;
     for (let side of [-1, 1])
@@ -119,14 +149,25 @@ export class Simulation {
             group: 0,
           },
         };
-        // Tight offset bends can produce concave quads. Triangulate those
-        // explicitly so Matter never substitutes a convex hull for the wall.
-        const polygons = Matter.Vertices.isConvex(vertices)
-          ? [vertices]
-          : [
-              [vertices[0], vertices[1], vertices[2]],
-              [vertices[0], vertices[2], vertices[3]],
-            ];
+        // On the inside of a tight bend several sections share one corner
+        // point (see edge() in track.ts), which leaves triangles and
+        // sections with no area at all. Triangulate so Matter never
+        // substitutes a convex hull, and drop the empty pieces.
+        const area = (p: Matter.Vector[]) =>
+          Math.abs(
+            (p[1].x - p[0].x) * (p[2].y - p[0].y) -
+              (p[2].x - p[0].x) * (p[1].y - p[0].y),
+          ) / 2;
+        const triangles = [
+          [vertices[0], vertices[1], vertices[2]],
+          [vertices[0], vertices[2], vertices[3]],
+        ];
+        const solid = triangles.filter((t) => area(t) > 0.5);
+        if (!solid.length) continue;
+        const polygons =
+          solid.length === 2 && Matter.Vertices.isConvex(vertices)
+            ? [vertices]
+            : solid;
         const parts = polygons.map((polygon) => {
           const centre = Matter.Vertices.centre(polygon);
           return Matter.Bodies.fromVertices(
@@ -166,6 +207,7 @@ export class Simulation {
     k.draft = 0;
     k.boost = 0;
     k.driftCharge = 0;
+    k.driftDir = 0;
     k.resetCount++;
     // A held kart is ghosted so traffic cannot move it or become blocked by it.
     Matter.Body.setStatic(k.body, true);
@@ -247,6 +289,20 @@ export class Simulation {
     const { ROAD, START, gatePosition } = this.track;
     this.time += 1 / 60;
     for (const k of this.karts) this.locate(k, k.segment);
+    if (this.catchUp) {
+      const lead = Math.max(...this.karts.map((k) => this.progress(k)));
+      for (const k of this.karts)
+        k.help = k.finish
+          ? 0
+          : Math.max(
+              0,
+              Math.min(
+                1,
+                (lead - this.progress(k) - CATCH_UP.from) /
+                  (CATCH_UP.fullAt - CATCH_UP.from),
+              ),
+            );
+    }
     const drafts = this.karts.map((k) => this.draftStrength(k));
     for (const k of this.karts) {
       const b = k.body;
@@ -293,10 +349,12 @@ export class Simulation {
         k.input.throttle < 0 && forward > 0.5
           ? tuning.braking
           : tuning.acceleration;
+      const topSpeed = tuning.topSpeed * (1 + CATCH_UP.topSpeed * k.help);
       // Smooth power taper limits engine speed without clamping impact momentum.
       const power =
         k.input.throttle > 0
-          ? Math.max(0, 1 - (Math.max(0, forward) / tuning.topSpeed) ** 4)
+          ? Math.max(0, 1 - (Math.max(0, forward) / topSpeed) ** 4) *
+            (1 + CATCH_UP.power * k.help)
           : 1;
       const slipstream = k.input.throttle > 0 ? 1 + 0.2 * k.draft : 1;
       Matter.Body.applyForce(b, b.position, {
@@ -313,20 +371,29 @@ export class Simulation {
           Math.abs(along) < PAD.length / 2 + 6 &&
           Math.abs(across) < PAD.width / 2 + 6
         )
-          k.boost = Math.max(k.boost, BOOST.pad);
+          k.boost = Math.max(
+            k.boost,
+            BOOST.pad * (1 + CATCH_UP.padBoost * k.help),
+          );
       }
       // Drift boost: charge while sliding through a turn, spend on release.
       if (k.input.drift && !off && forward > 3) {
-        if (k.input.steer !== 0) k.driftCharge += 1 / 60;
+        const dir = Math.sign(k.input.steer);
+        if (dir !== 0) {
+          if (dir !== k.driftDir) k.driftCharge = 0;
+          k.driftDir = dir;
+          k.driftCharge += 1 / 60;
+        }
       } else {
         const level = driftLevel(k);
         if (!k.input.drift && level > 0)
           k.boost = Math.max(k.boost, BOOST.driftBoost[level - 1]);
         k.driftCharge = 0;
+        k.driftDir = 0;
       }
       if (k.boost > 0) {
         k.boost = Math.max(0, k.boost - 1 / 60);
-        const cap = tuning.topSpeed * BOOST.speedCap;
+        const cap = topSpeed * BOOST.speedCap;
         const push =
           tuning.acceleration *
           BOOST.force *
@@ -372,6 +439,19 @@ export class Simulation {
       }
     }
     Matter.Engine.update(this.engine, 1000 / 60);
+  }
+  /** Roughly how far a kart has raced, in px of track. It counts timing
+   * gates, so reversing over the start line gains nothing. */
+  progress(k: Kart) {
+    const spacing = this.track.totalLength / this.gateCount;
+    const target = this.track.gatePosition(k.nextGate, this.gateCount);
+    return (
+      k.gates * spacing -
+      Math.min(
+        spacing,
+        Math.hypot(k.body.position.x - target.x, k.body.position.y - target.y),
+      )
+    );
   }
   positions() {
     return [...this.karts].sort((a, b) => {

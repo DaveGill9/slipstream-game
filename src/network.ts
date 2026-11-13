@@ -1,6 +1,6 @@
 import type { Input } from "./simulation";
 import { tracks } from "./track";
-import { MAX_LAPS } from "./simulation";
+import { MAX_LAPS, MAX_KARTS, SERIES } from "./simulation";
 export interface NetKart {
   id: number;
   x: number;
@@ -21,6 +21,7 @@ export interface NetKart {
   draft: number;
   boost: number;
   driftCharge: number;
+  driftDir: number;
   segment: number;
   input: Input;
 }
@@ -32,6 +33,25 @@ export interface Member {
   connected: boolean;
   dnf: boolean;
   seq: number;
+  /** Room leaderboard total over every race so far. */
+  points: number;
+}
+/** Final standings of a race, best first. `points` is what the race earned
+ * (place points plus the fastest-lap bonus) and `total` the room score. */
+export interface RaceResults {
+  rows: {
+    kart: number;
+    name: string;
+    finish: number;
+    points: number;
+    total: number;
+  }[];
+  fastestLap: { kart: number; time: number } | null;
+  /** Race number within the championship, its length (0 = free play) and
+   * whether this race decided it. */
+  round: number;
+  series: number;
+  final: boolean;
 }
 export interface RoomState {
   type: "state";
@@ -44,6 +64,12 @@ export interface RoomState {
   raceId: number;
   time: number;
   finishRemaining: number | null;
+  results: RaceResults | null;
+  /** Championship length (0 = free play) and races run so far. */
+  series: number;
+  round: number;
+  /** Winner of the last finished championship, or "". */
+  champion: string;
   members: Member[];
   karts: NetKart[];
   order: number[];
@@ -55,15 +81,24 @@ export function serverAddress(value: string) {
   if (url.protocol === "https:") url.protocol = "wss:";
   if (url.protocol === "http:") url.protocol = "ws:";
   if (!["ws:", "wss:"].includes(url.protocol))
-    throw Error("Use the HTTPS address printed by your PC launcher.");
+    throw Error("That is not a game server address.");
   if (location.protocol === "https:" && url.protocol !== "wss:")
-    throw Error(
-      "Online invites need the secure HTTPS address from your PC launcher.",
-    );
+    throw Error("This invite link is out of date. Ask the host for a new one.");
   url.pathname = "/race";
   url.search = "";
   url.hash = "";
   return url.toString();
+}
+/** The game server to use: normally the site this page was opened from. An
+ * old-style invite can still name one with ?server=, and the Vite dev page
+ * (port 5173) uses the local server on port 8080. */
+export function defaultServer() {
+  return (
+    new URLSearchParams(location.search).get("server") ||
+    (location.port === "5173"
+      ? `http://${location.hostname}:8080`
+      : location.origin)
+  );
 }
 export class OnlineClient {
   socket?: WebSocket;
@@ -114,7 +149,7 @@ export class OnlineClient {
     const timeout = setTimeout(() => {
       if (!this.connected) {
         this.onStatus(
-          "Cannot reach the game server. Check that the PC and launcher are running.",
+          "Cannot reach the game server. Ask the host to check it is still running.",
         );
         socket.close();
       }
@@ -161,7 +196,7 @@ export class OnlineClient {
       } else if (data.type === "pong") this.latency = Date.now() - data.at;
     };
     socket.onerror = () =>
-      this.onStatus("Connection failed. Check the PC server address.");
+      this.onStatus("Could not connect to the game server.");
     socket.onclose = () => {
       clearTimeout(timeout);
       this.connected = false;
@@ -188,7 +223,9 @@ export class OnlineClient {
   invite() {
     const url = new URL(location.href);
     url.search = "";
-    url.searchParams.set("server", this.endpoint);
+    // The page itself is normally the game server, so the code is enough.
+    if (this.endpoint !== serverAddress(location.origin))
+      url.searchParams.set("server", this.endpoint);
     url.searchParams.set("room", this.code);
     url.hash = "";
     return url.toString();
@@ -201,72 +238,169 @@ export class OnlineClient {
     this.socket?.close();
   }
 }
+const nameKey = "slipstream-name";
+const element = <K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  className = "",
+  text = "",
+) => {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text) node.textContent = text;
+  return node;
+};
 export class RoomPanel {
   root: HTMLDivElement;
+  title: HTMLElement;
+  subtitle: HTMLElement;
   status: HTMLElement;
   body: HTMLElement;
+  back: HTMLElement;
   constructor(
     public client: OnlineClient,
-    public leave: () => void,
+    public actions: {
+      leave: () => void;
+      settings: () => void;
+      /** CSS colour of each kart, by kart number. */
+      colors: string[];
+    },
   ) {
     this.root = document.createElement("div");
     this.root.className = "room-overlay";
     this.root.innerHTML =
-      '<section class="room-board"><h1>RACE WITH FRIENDS</h1><div class="room-body"></div><p class="room-status" role="status"></p><button class="room-back" type="button">BACK TO GARAGE</button></section>';
+      '<section class="room-board"><h1></h1><p class="menu-sub"></p><div class="room-body"></div><p class="room-status" role="status"></p><div class="room-actions"><button class="room-back room-settings" type="button">SETTINGS</button><button class="room-back room-leave" type="button"></button></div></section>';
     document.body.append(this.root);
+    this.title = this.root.querySelector("h1")!;
+    this.subtitle = this.root.querySelector(".menu-sub")!;
     this.body = this.root.querySelector(".room-body")!;
     this.status = this.root.querySelector(".room-status")!;
-    this.root.querySelector(".room-back")!.addEventListener("click", leave);
+    this.back = this.root.querySelector(".room-leave")!;
+    this.back.addEventListener("click", actions.leave);
+    this.root
+      .querySelector(".room-settings")!
+      .addEventListener("click", actions.settings);
   }
+  heading(title: string, subtitle: string, back: string) {
+    this.title.textContent = title;
+    this.subtitle.textContent = subtitle;
+    this.back.textContent = back;
+  }
+  /** First screen: pick a name, then join with a code or host a new room. */
   setup() {
-    this.body.innerHTML =
-      '<form><label>DRIVER NAME<input name="driver" maxlength="12" required autocomplete="off" value="Racer"></label><label>PC SERVER ADDRESS<input name="server" required placeholder="https://…trycloudflare.com" autocomplete="off"></label><label>ROOM CODE<input name="code" maxlength="6" placeholder="Leave blank to create a room" autocomplete="off"></label><button type="submit">CREATE / JOIN ROOM</button><p class="room-hint">Host: run the PC multiplayer launcher first.<br>Friend: open the invite link from the host.</p></form>';
-    const form = this.body.querySelector("form")!,
-      q = new URLSearchParams(location.search);
-    const server = form.elements.namedItem("server") as HTMLInputElement,
-      code = form.elements.namedItem("code") as HTMLInputElement;
-    server.value =
-      q.get("server") ||
-      (location.hostname === "localhost" || location.hostname === "127.0.0.1"
-        ? `${location.protocol}//${location.host}`
-        : "");
-    code.value = q.get("room") || "";
-    form.addEventListener("submit", (event) => {
-      event.preventDefault();
+    const invited = (new URLSearchParams(location.search).get("room") || "")
+      .replace(/[^a-z0-9]/gi, "")
+      .slice(0, 6)
+      .toUpperCase();
+    this.heading(
+      "RACE WITH FRIENDS",
+      invited
+        ? `YOU ARE INVITED TO ROOM ${invited}`
+        : `ONLINE RACES FOR UP TO ${MAX_KARTS} DRIVERS`,
+      "BACK TO GARAGE",
+    );
+    const join =
+      '<h3>JOIN A RACE</h3><div class="room-join"><input name="code" maxlength="6" placeholder="ROOM CODE" autocomplete="off" spellcheck="false" aria-label="Room code"><button type="submit">JOIN ROOM</button></div>';
+    const host =
+      '<h3>HOST A RACE</h3><button type="button" name="create">CREATE A ROOM</button><p class="room-hint">You get a room code and an invite link to send to your friends.</p>';
+    this.body.innerHTML = `<form novalidate><label>DRIVER NAME<input name="driver" maxlength="12" autocomplete="off" spellcheck="false"></label>${invited ? join + host : host + join}</form>`;
+    const form = this.body.querySelector("form")!;
+    const driver = form.elements.namedItem("driver") as HTMLInputElement,
+      code = form.elements.namedItem("code") as HTMLInputElement,
+      create = form.elements.namedItem("create") as HTMLButtonElement,
+      joinButton = form.querySelector<HTMLButtonElement>(".room-join button")!;
+    // The gold button is the likely next step; the other one is quieter.
+    (invited ? create : joinButton).classList.add("room-back");
+    code.value = invited;
+    try {
+      driver.value = localStorage.getItem(nameKey) || "";
+    } catch {
+      /* Storage may be disabled. */
+    }
+    code.addEventListener(
+      "input",
+      () => (code.value = code.value.replace(/[^a-z0-9]/gi, "").toUpperCase()),
+    );
+    const connect = (room: string) => {
+      const name = driver.value.trim();
+      if (!name) {
+        this.status.textContent = "Type a driver name first.";
+        driver.focus();
+        return;
+      }
       if (this.client.socket?.readyState === WebSocket.OPEN) {
-        this.status.textContent =
-          "Already connected. Leave before joining another room.";
+        this.status.textContent = "Already connecting. One moment…";
         return;
       }
       try {
-        this.status.textContent = "Connecting…";
-        this.client.connect(
-          server.value,
-          (form.elements.namedItem("driver") as HTMLInputElement).value,
-          code.value,
-        );
+        localStorage.setItem(nameKey, name);
+      } catch {
+        /* The name still applies for this visit. */
+      }
+      try {
+        this.status.textContent = room
+          ? `Joining room ${room}…`
+          : "Creating your room…";
+        this.client.connect(defaultServer(), name, room);
       } catch (e) {
         this.status.textContent = (e as Error).message;
       }
+    };
+    create.addEventListener("click", () => connect(""));
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      if (code.value) connect(code.value);
+      else {
+        this.status.textContent =
+          "Type the room code from your invite, or create a room.";
+        code.focus();
+      }
     });
+    (driver.value ? (invited ? joinButton : create) : driver).focus();
   }
   lobby(state: RoomState) {
-    this.root.style.display = "grid";
-    this.body.replaceChildren();
-    const title = document.createElement("h2");
-    title.textContent = `ROOM ${state.code}`;
-    this.body.append(title);
-    const hint = document.createElement("p");
-    hint.textContent = "Everyone ready? The host can start the race.";
-    this.body.append(hint);
-    const list = document.createElement("ul");
-    for (const member of state.members) {
-      const row = document.createElement("li");
-      row.textContent = `${member.name}${member.id === this.client.id ? " (YOU)" : ""}${member.id === state.hostId ? " · HOST" : ""} — ${member.connected ? (member.ready ? "READY" : "GETTING READY") : "RECONNECTING"}`;
-      list.append(row);
-    }
-    // The host chooses the circuit and distance; everyone else sees them.
     const isHost = state.hostId === this.client.id;
+    const everyoneReady = state.members.every((m) => m.ready && m.connected);
+    this.heading(
+      "RACE LOBBY",
+      `${state.members.length} OF ${MAX_KARTS} DRIVERS  /  ${state.series ? `RACE ${state.round + 1} OF ${state.series}` : "FREE PLAY"}  /  ${isHost ? "YOU ARE THE HOST" : "THE HOST STARTS"}`,
+      "LEAVE ROOM",
+    );
+    this.body.replaceChildren();
+    const button = (text: string, fn: () => void, quiet = false) => {
+      const b = element("button", quiet ? "room-back" : "", text);
+      b.type = "button";
+      b.onclick = fn;
+      return b;
+    };
+    // Room code with the invite button beside it.
+    const code = element("div", "room-code");
+    const label = element("div");
+    label.append(
+      element("span", "room-hint", "ROOM CODE"),
+      element("strong", "", state.code),
+    );
+    const copy = button("COPY INVITE LINK", () => {
+      navigator.clipboard
+        .writeText(this.client.invite())
+        .then(() => {
+          copy.textContent = "LINK COPIED";
+          this.status.textContent = "Invite copied. Send it to your friends.";
+        })
+        .catch(() => {
+          const input = document.createElement("input");
+          input.value = this.client.invite();
+          input.readOnly = true;
+          code.after(input);
+          input.select();
+          this.status.textContent = "Copy the selected invite link.";
+        });
+    });
+    code.append(label, copy);
+    this.body.append(code);
+    const settings = element("div", "room-options");
+    this.body.append(settings);
+    // The host chooses the circuit, distance and format; everyone else sees
+    // them.
     const setting = (
       label: string,
       options: [string, string][],
@@ -287,7 +421,7 @@ export class RoomPanel {
         chosen.textContent = options.find(([id]) => id === value)?.[1] ?? value;
         row.append(chosen);
       }
-      this.body.append(row);
+      settings.append(row);
     };
     setting(
       "TRACK",
@@ -304,44 +438,73 @@ export class RoomPanel {
       String(state.laps),
       (laps) => this.client.send({ type: "laps", laps: Number(laps) }),
     );
+    setting(
+      "FORMAT",
+      SERIES.map((races) => [
+        String(races),
+        races ? `${races} RACE CUP` : "FREE PLAY",
+      ]),
+      String(state.series),
+      (series) => this.client.send({ type: "series", series: Number(series) }),
+    );
+    // Once points are on the board the list is the room leaderboard.
+    const scored = state.members.some((m) => m.points > 0);
+    this.body.append(element("h3", "", scored ? "LEADERBOARD" : "DRIVERS"));
+    const list = element("ul", "room-drivers");
+    for (const member of [...state.members].sort(
+      (a, b) => b.points - a.points,
+    )) {
+      const row = element("li");
+      const swatch = element("i");
+      swatch.style.background = this.actions.colors[member.kart] ?? "#edf0da";
+      const name = element("span", "room-name", member.name);
+      if (member.id === this.client.id)
+        name.append(element("small", "", "YOU"));
+      if (member.id === state.hostId) name.append(element("small", "", "HOST"));
+      const mood = !member.connected
+        ? "RECONNECTING"
+        : member.ready
+          ? "READY"
+          : "NOT READY";
+      const chip = element("span", "room-chip", mood);
+      chip.dataset.mood = mood;
+      row.append(swatch, name);
+      if (scored)
+        row.append(element("span", "room-points", `${member.points} PTS`));
+      row.append(chip);
+      list.append(row);
+    }
     this.body.append(list);
     const me = state.members.find((m) => m.id === this.client.id);
-    const button = (text: string, fn: () => void) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.textContent = text;
-      b.onclick = fn;
-      this.body.append(b);
-      return b;
-    };
-    button(me?.ready ? "NOT READY" : "READY UP", () =>
-      this.client.send({ type: "ready", ready: !me?.ready }),
+    this.body.append(
+      button(
+        me?.ready ? "CANCEL READY" : "READY UP",
+        () => this.client.send({ type: "ready", ready: !me?.ready }),
+        !!me?.ready,
+      ),
     );
-    button("COPY INVITE LINK", () => {
-      navigator.clipboard
-        .writeText(this.client.invite())
-        .then(
-          () =>
-            (this.status.textContent =
-              "Invite copied — send it to your friend."),
-        )
-        .catch(() => {
-          const input = document.createElement("input");
-          input.value = this.client.invite();
-          input.readOnly = true;
-          this.body.append(input);
-          input.select();
-          this.status.textContent = "Copy the selected invite link.";
-        });
-    });
-    if (state.hostId === this.client.id) {
+    let hint = everyoneReady
+      ? "Everyone is ready. Waiting for the host to start."
+      : "The race can start once every driver is ready.";
+    if (isHost) {
       const start = button("START RACE", () =>
         this.client.send({ type: "start" }),
       );
-      start.disabled =
-        state.members.length < 2 ||
-        !state.members.every((m) => m.ready && m.connected);
+      start.disabled = state.members.length < 2 || !everyoneReady;
+      this.body.append(start);
+      hint =
+        state.members.length < 2
+          ? "Send the invite link to a friend. You need at least 2 drivers."
+          : everyoneReady
+            ? "Everyone is ready. Start when you like."
+            : "You can start once every driver is ready.";
     }
+    if (state.champion && state.round === 0)
+      hint += ` Last cup won by ${state.champion}.`;
+    this.body.append(element("p", "room-hint", hint));
+  }
+  show() {
+    this.root.style.display = "grid";
   }
   hide() {
     this.root.style.display = "none";

@@ -1,11 +1,20 @@
 import Phaser from "phaser";
 import Matter from "matter-js";
-import { OnlineClient, RoomPanel, type RoomState } from "./network";
+import {
+  OnlineClient,
+  RoomPanel,
+  type RoomState,
+  type RaceResults,
+} from "./network";
+import { podiumContent, championContent } from "./podium";
 import { GameAudio } from "./audio";
 import { Menu } from "./menu";
+import { Hud } from "./hud";
+import { paintScenery, paintTrackside } from "./scenery";
 const defaultHandling = { ...tuning };
 const audio = new GameAudio();
 const menu = new Menu();
+const hud = new Hud();
 // Phaser listens for keys on the whole window and blocks the browser's
 // default for driving keys (WASD, arrows, Space...), even while the game is
 // paused. That made those letters impossible to type into the lobby's name
@@ -29,6 +38,7 @@ import {
   Simulation,
   tuning,
   LAPS,
+  MAX_KARTS,
   driftLevel,
   type Input,
   type Kart,
@@ -47,22 +57,49 @@ function chevron(pad: Pad, along: number) {
   const c = Math.cos(pad.angle),
     s = Math.sin(pad.angle);
   return [
-    [along - 6, -15],
-    [along + 1, -15],
-    [along + 10, 0],
-    [along + 1, 15],
-    [along - 6, 15],
-    [along + 3, 0],
+    [along - 4, -9],
+    [along + 1, -9],
+    [along + 6, 0],
+    [along + 1, 9],
+    [along - 4, 9],
+    [along + 2, 0],
   ].map(([x, y]) => ({ x: pad.x + x * c - y * s, y: pad.y + x * s + y * c }));
 }
-const CHEVRONS = [-13, -1, 11];
+const CHEVRONS = [-9, -1, 7];
 // Drift spark colours by charge: warming up, small boost, big boost.
 const SPARKS = [0xeef2e6, 0x6cc6ff, 0xffa24a];
 const soloTrackKey = "slipstream-track";
 const colors = [
   0xffd35a, 0x70bfff, 0xe97262, 0x91c876, 0xb38cde, 0xe7eee2, 0xec91b4,
-  0x64d7c4,
+  0x64d7c4, 0xf08a3c, 0x4b63d6,
 ];
+const cssColors = colors.map((c) => `#${c.toString(16).padStart(6, "0")}`);
+/** Karts in a solo practice race; online rooms hold up to MAX_KARTS. */
+const SOLO_KARTS = 8;
+const noResults: RaceResults = {
+  rows: [],
+  fastestLap: null,
+  round: 0,
+  series: 0,
+  final: false,
+};
+// Race callouts: how long a lead or place change must hold before it is
+// announced (online positions can flicker for a frame), and how long a
+// callout or position arrow stays up.
+const CALLOUT = { settle: 0.6, show: 3, arrow: 2.5 };
+// Zebra crossings on street circuits, as distances after the start line.
+const CROSSINGS = [1100, 4650, 7300, 10600];
+const ROOFS = [
+  "#b9694d",
+  "#c98a5b",
+  "#d8ccb0",
+  "#e3ddc9",
+  "#9aa3a6",
+  "#6f7c88",
+  "#b25a48",
+  "#c7b48a",
+];
+const PARKED = ["#c8553d", "#e7eee2", "#3f6c8f", "#e3c66a", "#2f3a3c"];
 const names = [
   "YOU",
   "BLUE",
@@ -72,6 +109,8 @@ const names = [
   "GHOST",
   "ROSE",
   "MINT",
+  "TANGO",
+  "COBALT",
 ];
 // Online smoothing: how many unacknowledged local steps to replay on each
 // server snapshot (20 steps covers ~330 ms of round-trip time), and how
@@ -92,8 +131,6 @@ class Race extends Phaser.Scene {
   sprites: Phaser.GameObjects.Image[] = [];
   marks!: Phaser.GameObjects.RenderTexture;
   effects!: Phaser.GameObjects.Graphics;
-  hud!: Phaser.GameObjects.Container;
-  panel?: Phaser.GameObjects.Container;
   debug?: Phaser.GameObjects.Container;
   keys!: Record<string, Phaser.Input.Keyboard.Key>;
   state: "garage" | "countdown" | "race" | "pause" | "results" | "lobby" =
@@ -106,19 +143,28 @@ class Race extends Phaser.Scene {
   sendElapsed = 0;
   pendingReset = false;
   inputLog: { seq: number; input: Input }[] = [];
-  smoothing = Array.from({ length: 8 }, () => ({ x: 0, y: 0, a: 0 }));
-  podiumHostId = "";
+  smoothing = Array.from({ length: MAX_KARTS }, () => ({ x: 0, y: 0, a: 0 }));
+  /** The online race whose podium we have already shown. */
+  podiumRaceId = -1;
+  /** Final standings, kept so the podium survives the room reopening. */
+  podium: RaceResults = noResults;
+  /** A cup's last race shows the race podium first, then the champion. */
+  podiumStage: "race" | "champion" = "race";
+  /** The parts of a cup podium that change as racers ready up. */
+  nextRace?: { status: HTMLElement; label: HTMLElement };
+  /** After finishing online: the kart the camera follows (-1 = our own). */
+  watching = -1;
+  lastView = -1;
+  /** Taps of A / D (or the arrows) not yet used to change who we watch. */
+  watchStep = 0;
+  /** What the race callouts have seen so far (see callouts()). */
+  notes = this.freshNotes();
   networkMessage = "";
-  networkText!: Phaser.GameObjects.Text;
-  kartLabels: Phaser.GameObjects.Text[] = [];
+  /** Centre-screen text: the countdown, or a lap / penalty notice. */
+  banner = "";
   accumulator = 0;
   countdown = 0;
-  hudText!: Phaser.GameObjects.Text;
-  speedText!: Phaser.GameObjects.Text;
-  countText!: Phaser.GameObjects.Text;
-  map!: Phaser.GameObjects.Graphics;
   debugOn = false;
-  timingText!: Phaser.GameObjects.Text;
   trails!: Phaser.GameObjects.Graphics;
   /** Animated shine on the boost pads. */
   padShine!: Phaser.GameObjects.Graphics;
@@ -136,7 +182,7 @@ class Race extends Phaser.Scene {
   lapNotice = "";
   lapNoticeUntil = 0;
   // Which HTML menu is showing; Enter and M only act on the main one.
-  menuScreen: "" | "main" | "settings" | "pause" = "";
+  menuScreen: "" | "main" | "settings" | "pause" | "podium" = "";
   heardLaps = 0;
   lastCount = "";
   wasCounting = false;
@@ -165,20 +211,24 @@ class Race extends Phaser.Scene {
     ];
     this.makeKarts();
     this.setTrack(this.soloTrack, true);
-    this.sprites = this.sim.karts.map((k) =>
+    this.sprites = colors.map((_, id) =>
       this.add
-        .image(k.body.position.x, k.body.position.y, `kart-${k.id}`)
-        .setDepth(5),
-    );
-    this.kartLabels = this.sprites.map(() =>
-      this.label(0, 0, "", 9).setOrigin(0.5).setDepth(9),
+        .image(0, 0, `kart-${id}`)
+        .setDepth(5)
+        .setVisible(id < SOLO_KARTS),
     );
     this.cameras.main.setRoundPixels(true);
     this.keys = this.input.keyboard!.addKeys(
       "W,A,S,D,UP,DOWN,LEFT,RIGHT,SPACE,R,ESC,ENTER,F2,M",
     ) as typeof this.keys;
     this.input.keyboard!.addCapture(["SPACE", "UP", "DOWN", "LEFT", "RIGHT"]);
-    this.hud = this.add.container(0, 0).setScrollFactor(0).setDepth(30);
+    // Spectator camera: every tap counts, however short (see update()).
+    this.input.keyboard!.on("keydown", (event: KeyboardEvent) => {
+      if (event.repeat) return;
+      if (event.code === "KeyA" || event.code === "ArrowLeft") this.watchStep--;
+      if (event.code === "KeyD" || event.code === "ArrowRight")
+        this.watchStep++;
+    });
     this.scale.on("resize", () => this.layout());
     this.layout();
     this.garage();
@@ -222,7 +272,7 @@ class Race extends Phaser.Scene {
         .setDepth(7);
     this.cameras.main.setBounds(0, 0, WORLD.width, WORLD.height);
     this.sim?.destroy();
-    this.sim = new Simulation(8, new Set([0]), track);
+    this.sim = new Simulation(SOLO_KARTS, new Set([0]), track);
     const grid = track.gridPosition(0);
     this.cameras.main.centerOn(grid.x, grid.y);
     try {
@@ -255,6 +305,132 @@ class Race extends Phaser.Scene {
     stroke(ROAD, "#4a5252");
     stroke(1, "#939887", [12, 22]);
   }
+  /** City blocks for a street circuit: side streets on a grid, with
+   * buildings, small parks and car parks on every lot clear of the road. */
+  paintCity(c: CanvasRenderingContext2D, random: () => number) {
+    const { WORLD, ROAD, nearest, grandstands, sign } = this.track;
+    const clear = ROAD / 2 + 46,
+      BLOCK = { width: 236, height: 212, street: 30 };
+    c.fillStyle = "#7b7f7b";
+    for (let x = 20; x < WORLD.width; x += BLOCK.width)
+      c.fillRect(x, 0, BLOCK.street, WORLD.height);
+    for (let y = 20; y < WORLD.height; y += BLOCK.height)
+      c.fillRect(0, y, WORLD.width, BLOCK.street);
+    c.fillStyle = "#a5a79f";
+    for (let x = 20; x < WORLD.width; x += BLOCK.width)
+      for (let y = 0; y < WORLD.height; y += 26)
+        c.fillRect(x + BLOCK.street / 2 - 1, y, 2, 12);
+    for (let y = 20; y < WORLD.height; y += BLOCK.height)
+      for (let x = 0; x < WORLD.width; x += 26)
+        c.fillRect(x, y + BLOCK.street / 2 - 1, 12, 2);
+    const reserved = grandstands.map((g) => ({
+      x: g.x - 14,
+      y: g.y - 14,
+      w: g.width + 28,
+      h: g.height + 28,
+    }));
+    if (sign) reserved.push({ x: sign.x - 10, y: sign.y - 10, w: 340, h: 52 });
+    const free = (x: number, y: number, w: number, h: number) => {
+      for (let i = 0; i <= 3; i++)
+        for (let j = 0; j <= 3; j++)
+          if (
+            nearest({ x: x + (w * i) / 3, y: y + (h * j) / 3 }).distance < clear
+          )
+            return false;
+      return !reserved.some(
+        (r) => x < r.x + r.w && x + w > r.x && y < r.y + r.h && y + h > r.y,
+      );
+    };
+    const tree = (x: number, y: number) => {
+      c.fillStyle = "#526a3b";
+      c.fillRect(x - 6, y - 3, 14, 11);
+      c.fillRect(x - 3, y - 6, 9, 17);
+      c.fillStyle = "#82964f";
+      c.fillRect(x - 4, y - 4, 8, 8);
+      c.fillStyle = "#9aab64";
+      c.fillRect(x - 2, y - 3, 3, 3);
+    };
+    const lot = (x: number, y: number, w: number, h: number) => {
+      const kind = random();
+      if (kind < 0.13) {
+        // A small park.
+        c.fillStyle = "#5d7242";
+        c.fillRect(x, y, w, h);
+        c.fillStyle = "#6e834c";
+        c.fillRect(x + 3, y + 3, w - 6, h - 6);
+        for (let i = 0; i < 2 + Math.floor((w * h) / 4500); i++)
+          tree(x + 12 + random() * (w - 24), y + 12 + random() * (h - 24));
+        return;
+      }
+      if (kind < 0.22) {
+        // A car park: bays along the top and bottom, some of them taken.
+        c.fillStyle = "#585d5d";
+        c.fillRect(x, y, w, h);
+        for (let bx = x + 6; bx < x + w - 14; bx += 14)
+          for (const by of [y + 5, y + h - 25]) {
+            c.fillStyle = "#b9bcb4";
+            c.fillRect(bx, by, 1, 20);
+            if (random() < 0.55) {
+              c.fillStyle = PARKED[Math.floor(random() * PARKED.length)];
+              c.fillRect(bx + 3, by + 2, 9, 16);
+              c.fillStyle = "#1f2a2a";
+              c.fillRect(bx + 4, by + 5, 7, 4);
+            }
+          }
+        return;
+      }
+      // A building seen from above: shadow, roof, parapet, rooftop units.
+      c.fillStyle = "rgba(28, 38, 38, 0.38)";
+      c.fillRect(x + 6, y + 8, w, h);
+      c.fillStyle = ROOFS[Math.floor(random() * ROOFS.length)];
+      c.fillRect(x, y, w, h);
+      if (random() < 0.4) {
+        // A pitched roof: one half in shade.
+        c.fillStyle = "rgba(0, 0, 0, 0.13)";
+        if (w > h) c.fillRect(x, y + h / 2, w, h / 2);
+        else c.fillRect(x + w / 2, y, w / 2, h);
+      }
+      c.lineWidth = 2;
+      c.strokeStyle = "rgba(0, 0, 0, 0.28)";
+      c.strokeRect(x + 1, y + 1, w - 2, h - 2);
+      c.strokeStyle = "rgba(255, 255, 255, 0.25)";
+      c.strokeRect(x + 4, y + 4, w - 8, h - 8);
+      for (let i = 0; i < 1 + Math.floor(random() * 3); i++) {
+        const ux = Math.round(x + 10 + random() * (w - 30)),
+          uy = Math.round(y + 10 + random() * (h - 28));
+        c.fillStyle = "rgba(0, 0, 0, 0.3)";
+        c.fillRect(ux + 2, uy + 3, 10, 8);
+        c.fillStyle = "#c9ccc6";
+        c.fillRect(ux, uy, 10, 8);
+        c.fillStyle = "#858a86";
+        c.fillRect(ux + 2, uy + 2, 6, 4);
+      }
+    };
+    const gap = 8,
+      w = BLOCK.width - BLOCK.street - gap * 2,
+      h = BLOCK.height - BLOCK.street - gap * 2;
+    for (
+      let bx = 20 + BLOCK.street + gap - BLOCK.width;
+      bx < WORLD.width;
+      bx += BLOCK.width
+    )
+      for (
+        let by = 20 + BLOCK.street + gap - BLOCK.height;
+        by < WORLD.height;
+        by += BLOCK.height
+      ) {
+        // One big lot if the whole block is clear (sometimes), else quarters.
+        if (random() < 0.4 && free(bx, by, w, h)) {
+          lot(bx, by, w, h);
+          continue;
+        }
+        const hw = (w - 6) / 2,
+          hh = (h - 6) / 2;
+        for (const qx of [bx, bx + hw + 6])
+          for (const qy of [by, by + hh + 6])
+            if (free(qx, qy, hw, hh)) lot(qx, qy, hw, hh);
+      }
+  }
   makeTrack() {
     const {
       WORLD,
@@ -276,15 +452,18 @@ class Race extends Phaser.Scene {
       WORLD.height,
     )!;
     const c = tex.context;
+    const street = this.track.theme === "street";
     let seed = 73;
     const random = () => {
       seed = (seed * 1664525 + 1013904223) >>> 0;
       return seed / 4294967296;
     };
-    c.fillStyle = "#6e834c";
+    c.fillStyle = street ? "#8e908a" : "#6e834c";
     c.fillRect(0, 0, WORLD.width, WORLD.height);
     for (let i = 0; i < 47000; i++) {
-      c.fillStyle = ["#748952", "#677e46", "#7a8d55"][i % 3];
+      c.fillStyle = street
+        ? ["#949690", "#888a84", "#9a9c96"][i % 3]
+        : ["#748952", "#677e46", "#7a8d55"][i % 3];
       c.fillRect(
         Math.floor(random() * WORLD.width),
         Math.floor(random() * WORLD.height),
@@ -292,6 +471,8 @@ class Race extends Phaser.Scene {
         2,
       );
     }
+    if (street) this.paintCity(c, random);
+    const decorated = paintScenery(c, this.track.scenery);
     const path = () => {
       c.beginPath();
       points.forEach((p, i) =>
@@ -301,11 +482,11 @@ class Race extends Phaser.Scene {
     };
     c.lineJoin = "round";
     path();
-    c.strokeStyle = "#a89b75";
+    c.strokeStyle = street ? "#b3b5ad" : "#a89b75";
     c.lineWidth = ROAD + 38;
     c.stroke();
     path();
-    c.strokeStyle = "#e7e4ca";
+    c.strokeStyle = street ? "#d9dad2" : "#e7e4ca";
     c.lineWidth = ROAD + 16;
     c.stroke();
     for (let side of [-1, 1])
@@ -344,7 +525,7 @@ class Race extends Phaser.Scene {
           j ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y),
         );
         c.closePath();
-        c.fillStyle = "#a9b5a5";
+        c.fillStyle = street ? "#d0d2ca" : "#a9b5a5";
         c.fill();
       }
       c.beginPath();
@@ -354,27 +535,62 @@ class Race extends Phaser.Scene {
       });
       c.closePath();
       c.lineWidth = 2;
-      c.strokeStyle = "#40574e";
+      c.strokeStyle = street ? "#4d5352" : "#40574e";
       c.stroke();
     }
+    if (street) {
+      // Zebra crossings, and street lamps outside the barriers.
+      for (const at of CROSSINGS) {
+        const s = this.track.startDistance + at,
+          a = this.track.atDistance(s - 5),
+          b = this.track.atDistance(s + 5);
+        c.save();
+        c.translate((a.x + b.x) / 2, (a.y + b.y) / 2);
+        c.rotate(Math.atan2(b.y - a.y, b.x - a.x));
+        c.fillStyle = "#d4d5c9";
+        for (let y = -ROAD / 2 + 7; y < ROAD / 2 - 10; y += 14)
+          c.fillRect(-12, y, 24, 7);
+        c.restore();
+      }
+      for (const side of [-1, 1])
+        for (let i = 0; i < points.length; i += 27) {
+          const p = offset(i, side * (ROAD / 2 + 38));
+          c.fillStyle = "#2e3436";
+          c.fillRect(Math.round(p.x) - 2, Math.round(p.y) - 2, 5, 5);
+          c.fillStyle = "#f6e9a8";
+          c.fillRect(Math.round(p.x) - 1, Math.round(p.y) - 1, 3, 3);
+        }
+    }
+    if (this.track.trackside) paintTrackside(c, this.track);
     // Chequered timing line and grid boxes, painted on the southern straight.
     for (let x = 0; x < 3; x++)
       for (let y = 0; y < 16; y++) {
         c.fillStyle = (x + y) % 2 ? "#e9e8d4" : "#243634";
         c.fillRect(START.x + x * 5, START.y - 64 + y * 8, 5, 8);
       }
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < MAX_KARTS; i++) {
       const { x, y } = gridPosition(i);
       c.strokeStyle = "#a3a797";
       c.lineWidth = 1;
       c.strokeRect(x - 15, y - 10, 26, 20);
     }
-    for (let i = 0; i < 230; i++) {
+    // Trees. A street circuit has its own, in the city's parks.
+    for (let i = 0; i < (street ? 0 : 230); i++) {
       const p = {
         x: 40 + random() * (WORLD.width - 80),
         y: 40 + random() * (WORLD.height - 80),
       };
       if (nearest(p).distance < 125) continue;
+      if (
+        decorated.some(
+          (b) =>
+            p.x > b.x - 12 &&
+            p.x < b.x + b.w + 12 &&
+            p.y > b.y - 12 &&
+            p.y < b.y + b.h + 12,
+        )
+      )
+        continue;
       c.fillStyle = "#526a3b";
       c.fillRect(p.x - 6, p.y - 3, 14, 11);
       c.fillRect(p.x - 3, p.y - 6, 9, 17);
@@ -463,7 +679,7 @@ class Race extends Phaser.Scene {
     tex.refresh();
   }
   makeKarts() {
-    for (let i = 0; i < 8; i++) {
+    for (let i = 0; i < colors.length; i++) {
       const g = this.make.graphics({ x: 0, y: 0 });
       g.fillStyle(0x1c2b29, 0.5);
       g.fillRect(3, 5, 22, 15);
@@ -493,100 +709,16 @@ class Race extends Phaser.Scene {
       g.destroy();
     }
   }
+  /** Redraws the canvas panels for a new window size. The race HUD is HTML
+   * (src/hud.ts) and sizes itself. */
   layout() {
-    this.hud.removeAll(true);
-    const w = this.scale.width,
-      h = this.scale.height;
-    const g = this.add.graphics().fillStyle(0x203630, 0.95);
-    g.fillRect(12, 12, 186, 46);
-    g.fillRect(w - 136, 12, 124, 46);
-    g.lineStyle(1, 0x83937a)
-      .strokeRect(12, 12, 186, 46)
-      .strokeRect(w - 136, 12, 124, 46);
-    this.hud.add(g);
-    this.hudText = this.label(23, 21, "", 11);
-    this.speedText = this.label(w - 125, 21, "000 KM/H", 12);
-    this.hud.add([this.hudText, this.speedText]);
-    g.fillRect(12, 64, 186, 58);
-    this.timingText = this.label(23, 72, "", 10);
-    this.hud.add(this.timingText);
-    this.hud.add(this.label(16, h - 22, "ESC  PIT MENU", 10, "#ecedce"));
-    this.countText = this.label(w / 2, h / 2 - 38, "", 52).setOrigin(0.5);
-    this.hud.add(this.countText);
-    this.networkText = this.label(w / 2, h - 41, "", 10, "#f0d278").setOrigin(
-      0.5,
-    );
-    this.hud.add(this.networkText);
-    this.map = this.add.graphics();
-    this.hud.add(this.map);
-    if (this.state === "results") this.results();
     if (this.debugOn) this.showDebug();
   }
-  board(title: string, subtitle: string, height = 278) {
-    this.panel?.destroy();
-    const w = Math.min(414, this.scale.width - 24),
-      h = height,
-      x = Math.round((this.scale.width - w) / 2),
-      y = Math.round((this.scale.height - h) / 2);
-    const p = this.add.container(x, y).setScrollFactor(0).setDepth(50);
-    const g = this.add.graphics();
-    g.fillStyle(0x122d29, 0.5).fillRect(
-      -this.scale.width,
-      -this.scale.height,
-      this.scale.width * 3,
-      this.scale.height * 3,
-    );
-    g.fillStyle(0x172f2b).fillRect(5, 6, w, h);
-    g.fillStyle(0xc5bea0).fillRect(0, 0, w, h);
-    g.fillStyle(0x263e35).fillRect(5, 5, w - 10, h - 10);
-    g.fillStyle(0xe3c66a).fillRect(5, 5, w - 10, 4);
-    for (const sx of [11, w - 14])
-      for (const sy of [14, h - 15])
-        g.fillStyle(0x8f947d).fillRect(sx, sy, 3, 3);
-    p.add(g);
-    p.add(this.label(24, 25, title, 28, "#f0d278"));
-    p.add(this.label(25, 64, subtitle, 10, "#aebb9d"));
-    this.panel = p;
-    return p;
-  }
-  button(
-    p: Phaser.GameObjects.Container,
-    y: number,
-    text: string,
-    action: () => void,
-    primary = false,
-  ) {
-    const width = Math.min(366, this.scale.width - 72);
-    const g = this.add
-      .graphics()
-      .fillStyle(primary ? 0xe3c66a : 0x365346)
-      .fillRect(24, y, width, 30);
-    const t = this.label(36, y + 8, text, 12, primary ? "#233d32" : "#e8e9cf");
-    // Phaser hit-tests each child with its own scroll factor, not the
-    // container's, so the zone must be fixed to the screen like its panel.
-    const zone = this.add
-      .zone(24, y, width, 30)
-      .setOrigin(0)
-      .setScrollFactor(0)
-      .setInteractive({ useHandCursor: true })
-      .on("pointerdown", () => {
-        audio.click();
-        action();
-      });
-    zone
-      .on("pointerover", () => t.setAlpha(0.65))
-      .on("pointerout", () => t.setAlpha(1));
-    p.add([g, t, zone]);
-  }
   openMenu(title: string, subtitle: string, screen: Race["menuScreen"]) {
-    this.panel?.destroy();
-    this.panel = undefined;
     this.menuScreen = screen;
     return menu.open(title, subtitle);
   }
   closeMenus() {
-    this.panel?.destroy();
-    this.panel = undefined;
     this.menuScreen = "";
     menu.close();
   }
@@ -648,9 +780,9 @@ class Race extends Phaser.Scene {
   start() {
     if (this.online) return;
     this.playerId = 0;
-    this.sprites.forEach((s) => s.setVisible(true));
+    this.sprites.forEach((s, i) => s.setVisible(i < SOLO_KARTS));
     this.sim.destroy();
-    this.sim = new Simulation(8, new Set([0]), this.track);
+    this.sim = new Simulation(SOLO_KARTS, new Set([0]), this.track);
     this.marks.clear();
     this.recordedLaps = 0;
     this.lapNotice = "";
@@ -699,98 +831,247 @@ class Race extends Phaser.Scene {
   }
   results() {
     this.state = "results";
-    this.closeMenus();
-    const p = this.board(
+    this.podiumStage = "race";
+    // Solo practice has no room points: build the same standings locally.
+    let results = this.podium;
+    if (!this.online) {
+      let fastestLap: RaceResults["fastestLap"] = null;
+      for (const k of this.sim.karts)
+        for (const time of k.lapTimes)
+          if (!fastestLap || time < fastestLap.time)
+            fastestLap = { kart: k.id, time };
+      results = {
+        ...noResults,
+        fastestLap,
+        rows: this.sim.positions().map((k) => ({
+          kart: k.id,
+          name: names[k.id],
+          finish: k.finish,
+          points: 0,
+          total: 0,
+        })),
+      };
+    }
+    const board = this.openMenu(
       "RACE PODIUM",
       this.online
-        ? `${this.track.name} / ROOM ${this.online.code}`
-        : `${this.track.name} / SOLO PRACTICE`,
-      348,
+        ? `${this.track.name}  /  ${results.series ? `RACE ${results.round} OF ${results.series}` : `ROOM ${this.online.code}`}`
+        : `${this.track.name}  /  SOLO PRACTICE`,
+      "podium",
+    ).add(
+      podiumContent(results, {
+        me: this.playerId,
+        points: !!this.online,
+        unfinished: this.online ? "DNF" : "RACING",
+        colors: cssColors,
+        icon: (kart) => this.textures.getBase64(`kart-${kart}`),
+      }),
+      true,
     );
-    const order = this.online
-      ? this.roomState!.order.map((id) => this.sim.karts[id])
-      : this.sim.positions();
-    const finishers = order.filter((k) => k.finish > 0);
-    const name = (id: number) =>
-      this.online
-        ? this.roomState?.members.find((m) => m.kart === id)?.name || "Racer"
-        : names[id];
-    const g = this.add.graphics();
-    p.add(g);
-    for (const [rank, x, h] of [
-      [1, 29, 45],
-      [0, 151, 66],
-      [2, 273, 32],
-    ]) {
-      const kart = finishers[rank];
-      g.fillStyle([0xd6b655, 0xa8b4ad, 0xaf805a][rank]).fillRect(
-        x,
-        201 - h,
-        110,
-        h,
-      );
-      p.add(
-        this.label(x + 55, 205 - h, String(rank + 1), 22, "#233d32").setOrigin(
-          0.5,
-          0,
-        ),
-      );
-      if (kart) {
-        p.add(this.add.image(x + 55, 189 - h, `kart-${kart.id}`).setScale(1));
-        p.add(this.label(x + 55, 169 - h, name(kart.id), 10).setOrigin(0.5, 0));
-        p.add(
-          this.label(
-            x + 55,
-            185,
-            formatTime(kart.finish),
-            9,
-            "#233d32",
-          ).setOrigin(0.5, 0),
+    this.nextRace = undefined;
+    if (this.online && this.cupContinues()) {
+      // Mid-cup: everyone readies up here and the next race starts by itself.
+      const box = document.createElement("div"),
+        status = document.createElement("p");
+      box.className = "podium-next";
+      status.className = "room-hint";
+      if (this.roomState?.hostId === this.online.id) {
+        const row = document.createElement("label"),
+          select = document.createElement("select");
+        row.textContent = "NEXT TRACK";
+        for (const t of Object.values(tracks))
+          select.add(new Option(t.name, t.id));
+        select.value = this.roomState.track;
+        select.addEventListener("change", () =>
+          this.online?.send({ type: "track", track: select.value }),
         );
-      } else p.add(this.label(x + 55, 143 - h, "—", 14).setOrigin(0.5, 0));
-    }
-    order.forEach((k, i) => {
-      const x = 25 + (i >= 4 ? 187 : 0),
-        y = 216 + (i % 4) * 17;
-      p.add(
-        this.label(
-          x,
-          y,
-          `${i + 1} ${name(k.id).slice(0, 10).padEnd(10)} ${k.finish ? formatTime(k.finish) : this.online ? "DNF" : "RACING"}`,
-          9,
-          k.id === this.playerId ? "#f0d278" : "#edf0da",
-        ),
-      );
-    });
-    if (this.online) {
-      if (this.isRoomHost())
-        this.button(
-          p,
-          300,
-          "BACK TO LOBBY / RACE AGAIN          ENTER",
-          () => this.rematch(),
-          true,
-        );
-      else {
-        p.add(
-          this.label(
-            25,
-            289,
-            "WAITING FOR THE HOST TO RETURN TO THE LOBBY",
-            9,
-            "#aebb9d",
-          ),
-        );
-        this.button(p, 305, "LEAVE ROOM", () => this.leaveOnline());
+        row.append(select);
+        box.append(row);
       }
-    } else
-      this.button(
-        p,
-        300,
-        "RACE AGAIN                         ENTER",
-        () => this.start(),
-        true,
+      box.append(status);
+      board
+        .add(box, true)
+        .button("READY FOR NEXT RACE", () => this.podiumNext(), {
+          primary: true,
+          key: "ENTER",
+        })
+        .button("RETURN TO LOBBY", () => this.backToLobby());
+      this.nextRace = {
+        status,
+        label: board.board.querySelector<HTMLElement>(
+          "button.menu-button:not(.room-back) span",
+        )!,
+      };
+      if (this.roomState) this.showNextRace(this.roomState);
+    } else if (this.online)
+      // Everyone goes back to the room on their own; leaving is done there.
+      // The last race of a cup shows the champion first.
+      board.button(
+        results.final ? "SEE THE CHAMPION" : "RETURN TO LOBBY",
+        () => this.podiumNext(),
+        { primary: true, key: "ENTER" },
       );
+    else
+      board
+        .button("RACE AGAIN", () => this.start(), {
+          primary: true,
+          key: "ENTER",
+        })
+        .button("GARAGE", () => this.garage());
+  }
+  /** The podium's main button: on to the champion screen after a cup's
+   * last race, otherwise back to the lobby. */
+  podiumNext() {
+    if (this.cupContinues()) {
+      const me = this.roomState?.members.find((m) => m.id === this.online?.id);
+      this.online?.send({ type: "ready", ready: !me?.ready });
+      return;
+    }
+    if (!this.podium.final || this.podiumStage === "champion")
+      return this.backToLobby();
+    this.podiumStage = "champion";
+    audio.finish();
+    this.openMenu(
+      "CHAMPION",
+      `${this.podium.series} RACE CUP  /  ROOM ${this.online?.code ?? ""}`,
+      "podium",
+    )
+      .add(
+        championContent(this.podium, {
+          me: this.playerId,
+          colors: cssColors,
+          icon: (kart) => this.textures.getBase64(`kart-${kart}`),
+        }),
+        true,
+      )
+      .button("RETURN TO LOBBY", () => this.backToLobby(), {
+        primary: true,
+        key: "ENTER",
+      });
+  }
+  /** A cup with races still to run: the podium leads to the next race. */
+  cupContinues() {
+    return (
+      this.podium.series > 0 &&
+      !this.podium.final &&
+      this.roomState?.phase === "podium"
+    );
+  }
+  /** Who is ready for the next race, on the cup podium. */
+  showNextRace(state: RoomState) {
+    if (!this.nextRace) return;
+    const here = state.members.filter((m) => m.connected),
+      waiting = here.filter((m) => !m.ready),
+      me = state.members.find((m) => m.id === this.online?.id);
+    const next = `NEXT: ${tracks[state.track]?.name ?? ""}`;
+    this.nextRace.label.textContent = me?.ready
+      ? "READY - CLICK TO CANCEL"
+      : "READY FOR NEXT RACE";
+    this.nextRace.status.textContent =
+      here.length < 2
+        ? "The next race needs at least two racers."
+        : `${next}  /  ${here.length - waiting.length} OF ${here.length} READY${
+            waiting.length
+              ? `  /  WAITING FOR ${waiting.map((m) => m.name).join(", ")}`
+              : ""
+          }`;
+  }
+  freshNotes() {
+    return {
+      sim: undefined as Simulation | undefined,
+      leader: -1,
+      leaderSince: 0,
+      announced: -1,
+      place: 0,
+      placeSince: 0,
+      shownPlace: 0,
+      bestLap: Infinity,
+      laps: [] as number[],
+      finalLap: false,
+      text: "",
+      tone: "",
+      until: 0,
+      arrow: 0,
+      arrowUntil: 0,
+    };
+  }
+  driverName(kart: number) {
+    return this.online
+      ? this.roomState?.members.find((m) => m.kart === kart)?.name || "Racer"
+      : names[kart];
+  }
+  /** Works out the race callouts: final lap, a new leader, a new fastest
+   * lap, and the arrow for a place gained or lost. Lead and place changes
+   * stay quiet until the leader has finished the first lap, because
+   * everyone is bunched together off the start. */
+  callouts(player: Kart) {
+    if (this.notes.sim !== this.sim)
+      this.notes = { ...this.freshNotes(), sim: this.sim };
+    const n = this.notes,
+      now = this.sim.time;
+    const say = (text: string, tone: string) => {
+      n.text = text;
+      n.tone = tone;
+      n.until = now + CALLOUT.show;
+    };
+    const order = this.sim.positions(),
+      leader = order[0],
+      settled = leader.lap >= 1;
+    if (leader.id !== n.leader) {
+      n.leader = leader.id;
+      n.leaderSince = now;
+    }
+    if (!settled || n.announced < 0) n.announced = n.leader;
+    else if (
+      n.leader !== n.announced &&
+      now - n.leaderSince > CALLOUT.settle &&
+      !leader.finish
+    ) {
+      n.announced = n.leader;
+      say(
+        leader.id === this.playerId
+          ? "YOU TAKE THE LEAD"
+          : `${this.driverName(leader.id).toUpperCase()} TAKES THE LEAD`,
+        "lead",
+      );
+    }
+    const place = order.indexOf(player) + 1;
+    if (place !== n.place) {
+      n.place = place;
+      n.placeSince = now;
+    }
+    if (!settled || !n.shownPlace) n.shownPlace = place;
+    else if (place !== n.shownPlace && now - n.placeSince > CALLOUT.settle) {
+      if (!player.finish) {
+        n.arrow = place < n.shownPlace ? 1 : -1;
+        n.arrowUntil = now + CALLOUT.arrow;
+      }
+      n.shownPlace = place;
+    }
+    for (const k of this.sim.karts) {
+      const done = k.lapTimes.length;
+      if (done <= (n.laps[k.id] ?? 0)) continue;
+      n.laps[k.id] = done;
+      const time = k.lapTimes[done - 1];
+      if (time >= n.bestLap) continue;
+      n.bestLap = time;
+      // Everyone's first lap is a "fastest lap" for a moment: skip those.
+      if (done >= 2)
+        say(
+          `FASTEST LAP  ${this.driverName(k.id).toUpperCase()}  ${formatTime(time)}`,
+          "fastest",
+        );
+    }
+    if (
+      !n.finalLap &&
+      this.sim.laps > 1 &&
+      player.lap === this.sim.laps - 1 &&
+      !player.finish
+    ) {
+      n.finalLap = true;
+      say("FINAL LAP", "final");
+      audio.beep();
+    }
   }
   clearSmoothing() {
     for (const s of this.smoothing) s.x = s.y = s.a = 0;
@@ -814,15 +1095,26 @@ class Race extends Phaser.Scene {
       }
     }
   }
-  isRoomHost() {
-    return !!this.online && this.roomState?.hostId === this.online.id;
-  }
-  rematch() {
+  /** Leaves the podium for the room lobby. The first racer to do this
+   * reopens the lobby on the server; the rest follow when they are ready. */
+  backToLobby() {
     if (!this.online?.connected) {
-      this.networkMessage = "Not connected to the PC server.";
+      this.networkMessage = "Not connected to the game server.";
       return;
     }
-    this.online.send({ type: "rematch" });
+    if (this.roomState?.phase === "podium")
+      this.online.send({ type: "rematch" });
+    this.state = "lobby";
+    this.closeMenus();
+    if (this.roomState?.phase === "lobby") this.receiveRoom(this.roomState);
+  }
+  /** Sound settings from the lobby; the room keeps updating underneath. */
+  lobbySettings() {
+    this.roomPanel?.hide();
+    this.settings(() => {
+      this.closeMenus();
+      this.roomPanel?.show();
+    });
   }
   openOnline() {
     Object.assign(tuning, defaultHandling);
@@ -839,7 +1131,11 @@ class Race extends Phaser.Scene {
         if (this.roomPanel) this.roomPanel.status.textContent = message;
       },
     );
-    this.roomPanel = new RoomPanel(this.online, () => this.leaveOnline());
+    this.roomPanel = new RoomPanel(this.online, {
+      leave: () => this.leaveOnline(),
+      settings: () => this.lobbySettings(),
+      colors: cssColors,
+    });
     this.roomPanel.setup();
   }
   leaveOnline() {
@@ -850,8 +1146,7 @@ class Race extends Phaser.Scene {
     this.roomPanel = undefined;
     this.playerId = 0;
     this.setTrack(this.soloTrack, true);
-    this.sprites.forEach((s) => s.setVisible(true));
-    this.kartLabels.forEach((t) => t.setVisible(false));
+    this.sprites.forEach((s, i) => s.setVisible(i < SOLO_KARTS));
     this.inputLog = [];
     this.clearSmoothing();
     this.input.keyboard!.enabled = true;
@@ -863,12 +1158,28 @@ class Race extends Phaser.Scene {
     this.roomState = state;
     const me = state.members.find((m) => m.id === this.online!.id);
     if (!me) return;
-    this.setTrack(tracks[state.track] ?? defaultTrack);
+    // Still reading the podium: the lobby opens on RETURN TO LOBBY. (Not
+    // mid-cup, where everyone is waiting for the next race: if somebody
+    // takes the room back to the lobby, the others follow.)
+    if (
+      state.phase === "lobby" &&
+      this.state === "results" &&
+      !(this.nextRace && this.podiumStage === "race")
+    )
+      return;
+    // On a cup podium the host may already have picked the next track; the
+    // scene only changes once that race starts.
+    if (state.phase !== "podium" || this.networkRaceId !== state.raceId)
+      this.setTrack(tracks[state.track] ?? defaultTrack);
     if (state.phase === "lobby") {
       this.state = "lobby";
-      this.closeMenus();
       this.input.keyboard!.enabled = false;
       this.roomPanel?.lobby(state);
+      // Keep the sound settings open if they are being changed.
+      if (this.menuScreen !== "settings") {
+        this.closeMenus();
+        this.roomPanel?.show();
+      }
       return;
     }
     this.roomPanel?.hide();
@@ -881,16 +1192,16 @@ class Race extends Phaser.Scene {
         new Set(state.karts.map((k) => k.id)),
         this.track,
         state.laps,
+        true,
       );
       this.networkRaceId = state.raceId;
+      this.watching = -1;
+      this.nextRace = undefined;
       this.accumulator = 0;
       this.marks.clear();
       this.closeMenus();
       this.sprites.forEach((sprite, i) =>
         sprite.setVisible(i < state.karts.length),
-      );
-      this.kartLabels.forEach((label, i) =>
-        label.setVisible(i < state.karts.length),
       );
       const p = state.karts[this.playerId];
       this.cameras.main.centerOn(p.x, p.y);
@@ -927,6 +1238,7 @@ class Race extends Phaser.Scene {
         "draft",
         "boost",
         "driftCharge",
+        "driftDir",
         "segment",
       ] as const)
         k[key] = remote[key];
@@ -961,11 +1273,12 @@ class Race extends Phaser.Scene {
     });
     if (state.phase === "podium") {
       this.inputLog = [];
-      // Redraw if the host changed so a new host gets the lobby button.
-      if (this.state !== "results" || this.podiumHostId !== state.hostId) {
-        this.podiumHostId = state.hostId;
+      if (this.podiumRaceId !== state.raceId) {
+        this.podiumRaceId = state.raceId;
+        this.podium = state.results ?? noResults;
         this.results();
       }
+      this.showNextRace(state);
     } else if (this.state !== "pause")
       this.state = state.phase === "countdown" ? "countdown" : "race";
   }
@@ -1104,8 +1417,8 @@ class Race extends Phaser.Scene {
       (this.menuScreen === "main" || this.state === "results")
     )
       this.start();
-    if (pressed("ENTER") && this.state === "results" && this.isRoomHost())
-      this.rematch();
+    if (pressed("ENTER") && this.state === "results" && this.online)
+      this.podiumNext();
     if (pressed("M") && this.menuScreen === "main") this.openOnline();
     if (pressed("ESC")) {
       if (this.state === "race" || this.state === "countdown") this.pause();
@@ -1128,7 +1441,7 @@ class Race extends Phaser.Scene {
         : this.countdown > 0.6
           ? String(Math.ceil(this.countdown - 0.6))
           : "GO!";
-      this.countText.setText(count);
+      this.banner = count;
       if (count !== this.lastCount) {
         this.lastCount = count;
         if (count === "GO!") audio.go();
@@ -1136,10 +1449,10 @@ class Race extends Phaser.Scene {
       }
       if (this.countdown <= 0) {
         this.state = "race";
-        this.countText.setText("");
+        this.banner = "";
       }
     } else {
-      this.countText.setText("");
+      this.banner = "";
       this.lastCount = "";
     }
     // Online has no "GO!" frame: the server moves straight to racing.
@@ -1214,6 +1527,7 @@ class Race extends Phaser.Scene {
     }
     const player = this.sim.karts[this.playerId] || this.sim.karts[0],
       b = player.body;
+    const racingNow = this.state === "race" || this.state === "pause";
     this.effects.clear();
     this.trails.clear();
     for (const g of this.fx) g.clear();
@@ -1267,15 +1581,6 @@ class Race extends Phaser.Scene {
         .setRotation(k.body.angle + smooth.a)
         // Karts on the bridge are drawn above its deck; the rest pass below.
         .setDepth(this.track.layer[k.segment] === LAYER.over ? 8 : 5);
-      const member = this.roomState?.members.find((m) => m.kart === k.id);
-      this.kartLabels[k.id]
-        .setVisible(!!this.online && !!member)
-        .setPosition(s.x, s.y - 21)
-        .setText(
-          member
-            ? `${member.name}${k.id === this.playerId ? " · YOU" : ""}${!member.connected ? " · OFFLINE" : ""}`
-            : "",
-        );
       const speed = Math.hypot(k.body.velocity.x, k.body.velocity.y);
       if (this.state === "race" && speed > 2.8 && !k.resetRemaining) {
         const fx = Math.cos(k.body.angle),
@@ -1330,12 +1635,47 @@ class Race extends Phaser.Scene {
       }
     }
     const cam = this.cameras.main;
-    const drawnX = b.position.x + this.smoothing[player.id].x,
-      drawnY = b.position.y + this.smoothing[player.id].y;
+    // Once our own race is over the camera rides with someone still racing;
+    // A / D or the arrow keys move on to the next racer.
+    let view = player;
+    const live =
+      this.online && player.finish && racingNow
+        ? this.sim.karts.filter((k) => {
+            const m = this.roomState?.members.find((p) => p.kart === k.id);
+            return !k.finish && !!m?.connected && !m.dnf;
+          })
+        : [];
+    if (live.length) {
+      let i = live.findIndex((k) => k.id === this.watching);
+      if (i < 0) {
+        // Start with whoever is furthest ahead of those still out there.
+        const ahead = this.roomState?.order.find((id) =>
+          live.some((k) => k.id === id),
+        );
+        i = Math.max(
+          0,
+          live.findIndex((k) => k.id === ahead),
+        );
+      } else if (this.state === "race")
+        i =
+          (((i + this.watchStep) % live.length) + live.length) % live.length;
+      view = live[i];
+      this.watching = view.id;
+    } else this.watching = -1;
+    this.watchStep = 0;
+    hud.watch(
+      this.watching < 0
+        ? ""
+        : (this.roomState?.members.find((m) => m.kart === this.watching)
+            ?.name ?? "RACER"),
+    );
+    const vb = view.body;
+    const drawnX = vb.position.x + this.smoothing[view.id].x,
+      drawnY = vb.position.y + this.smoothing[view.id].y;
     const tx =
         drawnX +
         Phaser.Math.Clamp(
-          b.velocity.x * 22,
+          vb.velocity.x * 22,
           -cam.width * 0.25,
           cam.width * 0.25,
         ) -
@@ -1343,24 +1683,57 @@ class Race extends Phaser.Scene {
       ty =
         drawnY +
         Phaser.Math.Clamp(
-          b.velocity.y * 22,
+          vb.velocity.y * 22,
           -cam.height * 0.25,
           cam.height * 0.25,
         ) -
         cam.height / 2;
-    const blend = 1 - Math.exp(-Math.min(delta, 100) / 160);
+    // Cut straight to a newly chosen kart instead of panning across the map.
+    const blend =
+      view.id === this.lastView
+        ? 1 - Math.exp(-Math.min(delta, 100) / 160)
+        : 1;
+    this.lastView = view.id;
     cam.setScroll(
       Math.round(Phaser.Math.Linear(cam.scrollX, tx, blend)),
       Math.round(Phaser.Math.Linear(cam.scrollY, ty, blend)),
     );
-    if (this.state === "race" && player.resetRemaining > 0) {
-      this.countText
-        .setFontSize(20)
-        .setText(`RESET PENALTY\n${player.resetRemaining.toFixed(1)}s`)
-        .setAlign("center");
-    } else if (this.state === "race" && this.sim.time < this.lapNoticeUntil) {
-      this.countText.setFontSize(16).setText(this.lapNotice);
-    } else this.countText.setFontSize(52);
+    // Name tags (online): HTML over the canvas, placed after the camera
+    // has moved so they stay glued to their karts.
+    const zoom = this.scale.zoom;
+    hud.tags(
+      this.online
+        ? this.sim.karts.flatMap((k) => {
+            const member = this.roomState?.members.find((m) => m.kart === k.id);
+            return member
+              ? [
+                  {
+                    x: (this.sprites[k.id].x - cam.scrollX) * zoom,
+                    y: (this.sprites[k.id].y - cam.scrollY - 15) * zoom,
+                    text: member.name + (member.connected ? "" : " (OFFLINE)"),
+                    me: k.id === this.playerId,
+                  },
+                ]
+              : [];
+          })
+        : [],
+    );
+    let notice = true;
+    if (this.state === "race" && player.resetRemaining > 0)
+      this.banner = `RESET PENALTY\n${player.resetRemaining.toFixed(1)}s`;
+    else if (this.state === "race" && this.sim.time < this.lapNoticeUntil)
+      this.banner = this.lapNotice;
+    else notice = false;
+    hud.banner(this.banner, notice);
+    hud.mode(
+      this.state === "race" ||
+        this.state === "countdown" ||
+        this.state === "pause"
+        ? "race"
+        : this.state === "results" && this.online
+          ? "status"
+          : "off",
+    );
     this.sprites.forEach((sprite, i) =>
       sprite.setAlpha(
         (this.sim.karts[i]?.resetRemaining ?? 0) > 0 ||
@@ -1372,20 +1745,42 @@ class Race extends Phaser.Scene {
     const pos = this.online
       ? (this.roomState?.order.indexOf(this.playerId) ?? 0) + 1
       : this.sim.positions().findIndex((k) => k.id === 0) + 1;
-    this.networkText.setText(
-      this.online
+    if (this.state === "race") this.callouts(player);
+    const racing = this.state === "race" || this.state === "pause";
+    hud.callout(
+      racing && this.sim.time < this.notes.until ? this.notes.text : "",
+      this.notes.tone,
+    );
+    hud.arrow(
+      racing && this.sim.time < this.notes.arrowUntil ? this.notes.arrow : 0,
+    );
+    const finishIn = this.roomState?.finishRemaining;
+    hud.set({
+      network: this.online
         ? this.networkMessage ||
-            (player.finish
-              ? "FINISHED — WAITING FOR THE PODIUM"
-              : `ROOM ${this.online.code}  /  ${this.online.latency}ms${this.roomState?.finishRemaining !== null && this.roomState?.finishRemaining !== undefined ? "  /  FINISH IN " + Math.ceil(this.roomState.finishRemaining) + "s" : ""}`)
+          (this.state === "results"
+            ? ""
+            : player.finish
+              ? this.watching < 0
+                ? "FINISHED - WAITING FOR THE PODIUM"
+                : `FINISHED${typeof finishIn === "number" ? " / RACE ENDS IN " + Math.ceil(finishIn) + "s" : ""}`
+              : `ROOM ${this.online.code} / ${this.online.latency}ms${typeof finishIn === "number" ? " / FINISH IN " + Math.ceil(finishIn) + "s" : ""}`)
         : "",
-    );
-    this.hudText.setText(
-      `P${pos} / ${this.sim.karts.length}     LAP ${Math.min(this.sim.laps, player.lap + 1)} / ${this.sim.laps}\n${this.sim.time.toFixed(1).padStart(5, "0")}   ${this.track.name}`,
-    );
-    this.timingText.setText(
-      `LAP  ${formatTime(player.finish ? player.lapTimes.at(-1)! : this.sim.time - player.lapStartedAt)}\nLAST ${formatTime(player.lapTimes.at(-1) ?? null)}\nPB   ${formatTime(this.records.lap)}${this.tunedSession ? " *" : ""}`,
-    );
+      position: `P${pos}/${this.sim.karts.length}`,
+      lap: `LAP ${Math.min(this.sim.laps, player.lap + 1)}/${this.sim.laps}`,
+      time: formatTime(this.sim.time),
+      track: this.track.name,
+      lapTime: formatTime(
+        player.finish
+          ? player.lapTimes.at(-1)!
+          : this.sim.time - player.lapStartedAt,
+      ),
+      lastLap: formatTime(player.lapTimes.at(-1) ?? null),
+      bestLap: formatTime(this.records.lap) + (this.tunedSession ? "*" : ""),
+      speed: String(
+        Math.round(Math.hypot(b.velocity.x, b.velocity.y) * 13),
+      ).padStart(3, "0"),
+    });
     const level = driftLevel(player);
     if (this.state === "race") {
       if (player.boost > this.lastBoost + 0.05) audio.boost();
@@ -1393,47 +1788,27 @@ class Race extends Phaser.Scene {
     }
     this.lastBoost = player.boost;
     this.lastDriftLevel = level;
-    const [status, colour] =
+    // Speed only; its colour hints at boost (gold), drift charge (blue,
+    // then orange) and slipstream (pale gold).
+    hud.speedColor(
       player.boost > 0
-        ? ["BOOST!", "#ffd36b"]
-        : player.input.drift && player.driftCharge > 0
-          ? [
-              ["DRIFT", "DRIFT  >", "DRIFT  >>"][level],
-              ["#edf0da", "#7cc8ff", "#ffb057"][level],
-            ]
+        ? "#ffd36b"
+        : player.input.drift && level > 0
+          ? ["#edf0da", "#7cc8ff", "#ffb057"][level]
           : player.draft > 0.1
-            ? ["DRAFT +" + Math.round(player.draft * 20) + "%", "#f5d982"]
-            : ["SLIPSTREAM", "#edf0da"];
-    this.speedText.setColor(colour);
-    this.speedText.setText(
-      `${String(Math.round(Math.hypot(b.velocity.x, b.velocity.y) * 13)).padStart(3, "0")} KM/H\n${status}`,
+            ? "#f5d982"
+            : "#edf0da",
     );
-    const { points, WORLD } = this.track;
-    // Fit the whole circuit inside the 104 x 64 map window.
-    const scale = Math.min(104 / WORLD.width, 64 / WORLD.height);
-    const mx = this.scale.width - 124 + (104 - WORLD.width * scale) / 2,
-      my = this.scale.height - 88 + (64 - WORLD.height * scale) / 2;
-    this.map
-      .clear()
-      .fillStyle(0x203630, 0.85)
-      .fillRect(this.scale.width - 132, this.scale.height - 96, 120, 80)
-      .lineStyle(5, 0x7b8c78);
-    this.map.beginPath();
-    points.forEach((p, i) =>
-      i
-        ? this.map.lineTo(mx + p.x * scale, my + p.y * scale)
-        : this.map.moveTo(mx + p.x * scale, my + p.y * scale),
-    );
-    this.map.closePath().strokePath();
-    for (const k of this.sim.karts)
-      this.map
-        .fillStyle(colors[k.id])
-        .fillRect(
-          mx + k.body.position.x * scale - 1,
-          my + k.body.position.y * scale - 1,
-          k.id !== this.playerId ? 2 : 4,
-          k.id !== this.playerId ? 2 : 4,
-        );
+    hud.map({
+      points: this.track.points,
+      world: this.track.WORLD,
+      karts: this.sim.karts.map((k) => ({
+        x: k.body.position.x,
+        y: k.body.position.y,
+        color: cssColors[k.id],
+        me: k.id === this.playerId,
+      })),
+    });
   }
 }
 // Pixel scaling goes through Phaser's own zoom so its pointer
@@ -1454,6 +1829,9 @@ const game = new Phaser.Game({
   scene: Race,
   audio: { noAudio: true },
 });
+// For looking at the game from the browser console while developing.
+if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV)
+  Object.assign(window, { slipstream: game });
 function resize() {
   const s = pixelScale();
   game.scale.resize(Math.ceil(innerWidth / s), Math.ceil(innerHeight / s));

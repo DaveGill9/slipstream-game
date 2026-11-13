@@ -61,16 +61,14 @@
         display: block;
         margin: 12px 0;
       }
-      .room-board label:has(select),
-      .room-board label:has(.room-track) {
-        display: inline-block;
-        width: calc(50% - 6px);
+      /* Track, laps and format, side by side in the lobby. */
+      .room-options {
+        display: grid;
+        grid-template-columns: 1.5fr 1fr 1.1fr;
+        gap: 10px;
       }
-      .room-board label:has(select) + label {
-        margin-left: 12px;
-      }
-      .room-board label:has(.room-track) + label {
-        margin-left: 12px;
+      .room-board .room-options select {
+        padding: 10px 6px;
       }
       .room-board input,
       .room-board select {
@@ -103,12 +101,100 @@
         color: #edf0da;
       }
       .room-board ul {
+        margin: 0 0 14px;
         padding: 0;
         list-style: none;
       }
       .room-board li {
-        padding: 6px 0;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 5px 0;
         border-bottom: 1px solid #50624e;
+      }
+      /* Lobby (src/network.ts). */
+      .room-board li i {
+        width: 10px;
+        height: 10px;
+        flex: none;
+      }
+      .room-name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .room-name small {
+        margin-left: 8px;
+        padding: 1px 5px;
+        border: 1px solid #8a9c83;
+        font-size: 10px;
+        color: #aebb9d;
+      }
+      .room-chip {
+        font-size: 11px;
+        letter-spacing: 1px;
+        color: #aebb9d;
+      }
+      .room-chip[data-mood="READY"] {
+        color: #9fd67f;
+      }
+      .room-chip[data-mood="RECONNECTING"] {
+        color: #f0d278;
+      }
+      .room-code {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 12px;
+        background: #193129;
+        border: 1px solid #8a9c83;
+      }
+      .room-code .room-hint {
+        display: block;
+        letter-spacing: 1px;
+      }
+      .room-code strong {
+        font-size: 26px;
+        letter-spacing: 5px;
+        color: #f0d278;
+        user-select: all;
+      }
+      .room-board .room-code button {
+        width: auto;
+        margin: 0;
+        white-space: nowrap;
+      }
+      .room-join {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+      }
+      .room-board .room-join input {
+        margin: 0;
+        letter-spacing: 3px;
+        text-transform: uppercase;
+      }
+      .room-board .room-join input::placeholder {
+        letter-spacing: 1px;
+        color: #7f917c;
+      }
+      .room-board .room-join button {
+        width: auto;
+        margin: 0;
+        padding: 11px 16px;
+      }
+      .room-actions {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 10px;
+        margin-top: 14px;
+        padding-top: 4px;
+        border-top: 1px solid #50624e;
+      }
+      .room-status:empty {
+        display: none;
       }
       .room-board select {
         cursor: pointer;
@@ -212,6 +298,334 @@
       }
       .menu-keys dd {
         margin: 0;
+      }
+      .room-points {
+        font-size: 11px;
+        color: #f0d278;
+      }
+      /* Podium (src/podium.ts). */
+      .room-board.room-wide {
+        width: min(520px, calc(94vw / var(--ui-zoom, 1)));
+      }
+      .podium-steps {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        align-items: end;
+        gap: 10px;
+        margin-top: 4px;
+        text-align: center;
+      }
+      .podium-step img {
+        display: block;
+        width: 56px;
+        margin: 6px auto 4px;
+        image-rendering: pixelated;
+      }
+      .podium-name {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .podium-block {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 2px;
+        height: 54px;
+        background: #a8b4ad;
+        color: #233d32;
+        font-size: 11px;
+      }
+      .podium-block b {
+        font-size: 24px;
+      }
+      .podium-step[data-place="1"] .podium-block {
+        height: 80px;
+        background: #d6b655;
+      }
+      .podium-step[data-place="3"] .podium-block {
+        height: 40px;
+        background: #af805a;
+      }
+      .podium-fastest {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin: 14px 0 0;
+        padding: 8px 10px;
+        background: #193129;
+        border-left: 4px solid #b38cde;
+      }
+      .podium-fastest span:first-child {
+        font-size: 11px;
+        letter-spacing: 1px;
+        color: #cdb3ee;
+      }
+      .podium-fastest strong {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .podium-fastest em {
+        font-style: normal;
+        color: #f0d278;
+      }
+      .podium-table {
+        width: 100%;
+        margin: 12px 0 6px;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      .podium-table th {
+        padding: 0 6px 5px;
+        font-size: 10px;
+        letter-spacing: 1px;
+        color: #aebb9d;
+        text-align: right;
+      }
+      .podium-table td {
+        padding: 5px 6px;
+        border-top: 1px solid #50624e;
+        text-align: right;
+        white-space: nowrap;
+      }
+      .podium-table td:first-child {
+        width: 22px;
+        color: #aebb9d;
+      }
+      .podium-table th:nth-child(2),
+      .podium-table .podium-driver {
+        width: 100%;
+        text-align: left;
+      }
+      .podium-driver i {
+        display: inline-block;
+        width: 9px;
+        height: 9px;
+        margin-right: 8px;
+      }
+      .podium-driver small {
+        margin-left: 8px;
+        padding: 1px 5px;
+        border: 1px solid #b38cde;
+        font-size: 9px;
+        color: #cdb3ee;
+      }
+      .champion {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 6px;
+        margin: 6px 0 4px;
+        padding: 18px 12px 16px;
+        background: #193129;
+        border: 1px solid #e3c66a;
+      }
+      .champion img {
+        width: 112px;
+        image-rendering: pixelated;
+      }
+      .champion strong {
+        font-size: 28px;
+        letter-spacing: 2px;
+        color: #f0d278;
+      }
+      .champion span {
+        letter-spacing: 2px;
+        color: #aebb9d;
+      }
+      .podium-me td {
+        color: #f0d278;
+      }
+      .podium-gain {
+        color: #9fd67f;
+      }
+      /* In-race HUD (src/hud.ts). --u is one HUD pixel: a whole number of
+         screen pixels, so the pixel font stays sharp. */
+      .hud {
+        position: fixed;
+        inset: 0;
+        z-index: 5;
+        pointer-events: none;
+        user-select: none;
+        font:
+          calc(8 * var(--u)) / 1 "Press Start 2P",
+          monospace;
+        color: #edf0da;
+        -webkit-font-smoothing: none;
+      }
+      .hud[data-mode="off"],
+      .hud[data-mode="status"] > :not(.hud-network) {
+        display: none;
+      }
+      /* Name tags above karts, moved every frame by Hud.tags(). */
+      .hud-tags span {
+        position: absolute;
+        left: 0;
+        top: 0;
+        white-space: nowrap;
+        will-change: transform;
+        text-shadow:
+          var(--u) 0 #172f2b,
+          calc(-1 * var(--u)) 0 #172f2b,
+          0 var(--u) #172f2b,
+          0 calc(-1 * var(--u)) #172f2b;
+      }
+      .hud-tags .hud-tag-me {
+        color: #f0d278;
+      }
+      .hud-panel {
+        background: #203630f2;
+        border: var(--u) solid #83937a;
+        box-shadow: calc(2 * var(--u)) calc(2 * var(--u)) #172f2b80;
+        padding: calc(7 * var(--u)) calc(8 * var(--u));
+      }
+      /* Race callouts ("FINAL LAP") and the place gained / lost arrow. */
+      .hud-callout {
+        position: absolute;
+        left: 50%;
+        top: calc(10 * var(--u));
+        transform: translateX(-50%);
+        padding: calc(7 * var(--u)) calc(10 * var(--u));
+        white-space: pre;
+        background: #203630f2;
+        border: var(--u) solid #e3c66a;
+        color: #f0d278;
+        box-shadow: calc(2 * var(--u)) calc(2 * var(--u)) #172f2b80;
+      }
+      .hud-callout:empty {
+        display: none;
+      }
+      .hud-callout[data-tone="fastest"] {
+        border-color: #b38cde;
+        color: #d9c6f2;
+      }
+      .hud-callout[data-tone="final"] {
+        border-color: #edf0da;
+        color: #edf0da;
+      }
+      .hud-arrow {
+        display: inline-block;
+        margin-left: calc(4 * var(--u));
+        border: calc(3 * var(--u)) solid transparent;
+        visibility: hidden;
+      }
+      .hud-arrow[data-way="up"] {
+        visibility: visible;
+        border-top-width: 0;
+        border-bottom: calc(5 * var(--u)) solid #9fd67f;
+      }
+      .hud-arrow[data-way="down"] {
+        visibility: visible;
+        border-bottom-width: 0;
+        border-top: calc(5 * var(--u)) solid #e97262;
+      }
+      .hud-dim {
+        color: #aebb9d;
+      }
+      .hud-left {
+        position: absolute;
+        left: calc(10 * var(--u));
+        top: calc(10 * var(--u));
+        display: grid;
+        gap: calc(5 * var(--u));
+      }
+      .hud-race,
+      .hud-timing {
+        display: grid;
+        grid-template-columns: auto auto;
+        gap: calc(6 * var(--u)) calc(16 * var(--u));
+      }
+      .hud-race > :nth-child(even),
+      .hud-timing > :nth-child(even) {
+        text-align: right;
+      }
+      [data-hud="position"] {
+        color: #f0d278;
+      }
+      .hud-timing {
+        justify-self: start;
+      }
+      .hud-speed {
+        position: absolute;
+        right: calc(10 * var(--u));
+        top: calc(10 * var(--u));
+      }
+      .hud-banner {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 40%;
+        transform: translateY(-50%);
+        text-align: center;
+        white-space: pre;
+        font-size: calc(40 * var(--u));
+        line-height: 1.5;
+        text-shadow: calc(4 * var(--u)) calc(4 * var(--u)) #172f2b;
+      }
+      .hud-banner-small {
+        font-size: calc(16 * var(--u));
+        text-shadow: calc(2 * var(--u)) calc(2 * var(--u)) #172f2b;
+      }
+      /* After finishing: whose kart the camera is on, and the keys to
+         switch. */
+      .hud-watch {
+        position: absolute;
+        left: 50%;
+        bottom: calc(34 * var(--u));
+        transform: translateX(-50%);
+        white-space: nowrap;
+        color: #f0d278;
+        text-shadow: var(--u) var(--u) #172f2b;
+      }
+      .hud-watch[hidden] {
+        display: none;
+      }
+      .hud-watch .hud-keycap {
+        margin: 0 calc(8 * var(--u));
+        color: #edf0da;
+      }
+      .podium-next {
+        margin: 10px 0 2px;
+      }
+      .podium-next label {
+        display: block;
+        margin-bottom: 8px;
+      }
+      .hud-network {
+        position: absolute;
+        left: calc(140 * var(--u));
+        right: calc(140 * var(--u));
+        bottom: calc(12 * var(--u));
+        text-align: center;
+        line-height: 1.6;
+        color: #f0d278;
+        text-shadow: var(--u) var(--u) #172f2b;
+      }
+      .hud-hint {
+        position: absolute;
+        left: calc(10 * var(--u));
+        bottom: calc(10 * var(--u));
+        text-shadow: var(--u) var(--u) #172f2b;
+      }
+      .hud-keycap {
+        display: inline-block;
+        margin-right: calc(3 * var(--u));
+        padding: calc(3 * var(--u));
+        background: #203630f2;
+        border: var(--u) solid #83937a;
+        text-shadow: none;
+      }
+      .hud-map {
+        position: absolute;
+        right: calc(10 * var(--u));
+        bottom: calc(10 * var(--u));
+        box-sizing: content-box;
+        width: calc(120 * var(--u));
+        height: calc(80 * var(--u));
+        padding: 0;
       }
     </style>
   </head>

@@ -1,7 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import Matter from "matter-js";
-import { Simulation, tuning, LAPS, BOOST, driftLevel } from "./simulation.ts";
+import {
+  Simulation,
+  tuning,
+  LAPS,
+  BOOST,
+  CATCH_UP,
+  driftLevel,
+} from "./simulation.ts";
 import { tracks, LAYER } from "./track.ts";
 const {
   atDistance,
@@ -26,6 +33,40 @@ test("throttle accelerates, brake slows, reset removes velocity without awarding
   assert.equal(k.body.speed, 0);
   assert.equal(k.gates, gates);
   s.destroy();
+});
+test("catch-up help: only when switched on, only for karts behind, and it raises top speed", () => {
+  const topSpeed = (catchUp, behind) => {
+    const s = new Simulation(2, new Set([0, 1]), tracks.foundry, LAPS, catchUp);
+    const [me, leader] = s.karts;
+    // Put the other kart a long way up the road, with its gates counted.
+    if (behind) {
+      leader.gates = 12;
+      leader.nextGate = 13;
+      Matter.Body.setPosition(leader.body, gatePosition(12));
+    }
+    const inputs = new Map([
+      [0, { ...idle, throttle: 1 }],
+      [1, idle],
+    ]);
+    let best = 0;
+    for (let i = 0; i < 240; i++) {
+      s.step(idle, inputs);
+      Matter.Body.setVelocity(leader.body, { x: 0, y: 0 });
+      best = Math.max(best, me.body.speed);
+    }
+    const help = [me.help, leader.help];
+    s.destroy();
+    return { best, help };
+  };
+  const off = topSpeed(false, true),
+    level = topSpeed(true, false),
+    helped = topSpeed(true, true);
+  assert.deepEqual(off.help, [0, 0]);
+  assert.equal(level.help[0], 0);
+  assert.deepEqual(helped.help, [1, 0]);
+  assert.ok(Math.abs(off.best - level.best) < 0.05);
+  assert.ok(helped.best > off.best * (1 + CATCH_UP.topSpeed / 2));
+  assert.ok(helped.best < off.best * (1 + CATCH_UP.topSpeed * 1.5));
 });
 test("finish line shortcuts do not count; ordered gates complete exactly the race distance", () => {
   const s = new Simulation(),
@@ -313,16 +354,23 @@ test("holding a slide charges a drift boost that fires on release", () => {
   const drifting = { throttle: 1, steer: 1, drift: true },
     release = { throttle: 1, steer: 0, drift: false };
   // A short slide earns nothing.
-  slide(30, drifting);
+  slide(20, drifting);
   assert.equal(driftLevel(k), 0);
   slide(1, release);
   assert.equal(k.boost, 0);
   // A long slide reaches level 2 and releases the big boost.
-  slide(100, drifting);
+  slide(70, drifting);
   assert.equal(driftLevel(k), 2);
   slide(1, release);
   assert.equal(k.driftCharge, 0);
   assert.ok(k.boost > BOOST.driftBoost[1] - 0.05);
+  // Weaving left and right never builds a charge, however long it lasts.
+  slide(60, release);
+  for (let i = 0; i < 8; i++)
+    slide(20, { throttle: 1, steer: i % 2 ? 1 : -1, drift: true });
+  assert.equal(driftLevel(k), 0);
+  slide(1, release);
+  assert.equal(k.boost, 0);
   // Straight-line drifting with no steering does not charge.
   slide(60, release);
   slide(100, { throttle: 1, steer: 0, drift: true });

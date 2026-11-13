@@ -23,6 +23,7 @@ export class Menu {
     return this.root.style.display !== "none";
   }
   open(title: string, subtitle: string) {
+    this.board.classList.remove("room-wide");
     this.board.replaceChildren(
       element("h1", "", title),
       element("p", "menu-sub", subtitle),
@@ -48,6 +49,12 @@ export class Menu {
     if (key) button.append(element("span", "menu-key", key));
     button.addEventListener("click", action);
     this.board.append(button);
+    return this;
+  }
+  /** Adds ready-made content, such as the podium. */
+  add(node: HTMLElement, wide = false) {
+    this.board.classList.toggle("room-wide", wide);
+    this.board.append(node);
     return this;
   }
   heading(text: string) {

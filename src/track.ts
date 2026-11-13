@@ -1,5 +1,7 @@
 import foundryMap from "../assets/tracks/foundry.json";
 import overpassData from "../assets/tracks/overpass.json";
+import valenciaData from "../assets/tracks/valencia.json";
+import type { SceneryItem } from "./scenery";
 export type Point = { x: number; y: number };
 export interface TrackData {
   id: string;
@@ -13,12 +15,19 @@ export interface TrackData {
   start: Point;
   grandstands: { x: number; y: number; width: number; height: number }[];
   sign?: Point;
+  /** Scenery around the road: grass and trees ("park", the default) or
+   * city blocks ("street"). Painted in makeTrack in src/main.ts. */
+  theme?: "park" | "street";
+  /** Decorations painted on the ground (see src/scenery.ts). */
+  scenery?: SceneryItem[];
+  /** Tyre stacks around the bends and sponsor boards along the straights. */
+  trackside?: boolean;
   /** Boost pads: `at` is the distance after the start line, `offset` how far
    * right (+) or left (-) of the centreline the pad sits. */
   pads?: { at: number; offset: number }[];
 }
 /** Boost pad size: length along the road and width across it. */
-export const PAD = { length: 44, width: 40 };
+export const PAD = { length: 30, width: 26 };
 export const angleDiff = (a: number, b: number) =>
   Math.atan2(Math.sin(a - b), Math.cos(a - b));
 // Where one stretch of road passes over another, each stretch is a layer for
@@ -120,13 +129,108 @@ export function buildTrack(data: TrackData) {
     }
     return scan(p, 0, count);
   }
-  function offset(i: number, d: number) {
-    const p = points[i],
-      a = points[(i - 1 + count) % count],
-      b = points[(i + 1) % count];
-    const h = Math.atan2(b.y - a.y, b.x - a.x);
-    return { x: p.x - Math.sin(h) * d, y: p.y + Math.cos(h) * d };
+  /**
+   * The line `d` to the right (+) or left (-) of the centreline, one point
+   * per centreline point. On the inside of a bend tighter than `d` the plain
+   * sideways offset doubles back on itself and pokes out behind the corner,
+   * so that loop is cut off: its points all move to where the line crosses
+   * itself, which leaves one clean corner.
+   */
+  const edges = new Map<number, Point[]>();
+  function edge(d: number) {
+    const known = edges.get(d);
+    if (known) return known;
+    const mod = (i: number) => ((i % count) + count) % count;
+    const raw = points.map((p, i) => {
+      const a = points[mod(i - 1)],
+        b = points[mod(i + 1)];
+      const h = Math.atan2(b.y - a.y, b.x - a.x);
+      return { x: p.x - Math.sin(h) * d, y: p.y + Math.cos(h) * d };
+    });
+    const line = raw.map((p) => ({ ...p }));
+    edges.set(d, line);
+    // Segments of the offset line that run against the road's direction.
+    const back = points.map((a, i) => {
+      const b = points[mod(i + 1)],
+        p = raw[i],
+        q = raw[mod(i + 1)];
+      return (b.x - a.x) * (q.x - p.x) + (b.y - a.y) * (q.y - p.y) <= 0;
+    });
+    // A bend can double back in two places; treat close ones as one loop.
+    const JOIN = 8;
+    let since = Infinity;
+    const before = back.map(() => 0);
+    for (let i = -JOIN; i < count; i++) {
+      since = back[mod(i)] ? 0 : since + 1;
+      if (i >= 0) before[i] = since;
+    }
+    since = Infinity;
+    const folded = [...back];
+    for (let i = count + JOIN; i >= 0; i--) {
+      since = back[mod(i)] ? 0 : since + 1;
+      if (i < count && before[i] + since <= JOIN + 1) folded[i] = true;
+    }
+    if (folded.every(Boolean)) return line;
+    const crossing = (i: number, j: number) => {
+      const a = raw[mod(i)],
+        b = raw[mod(i + 1)],
+        c = raw[mod(j)],
+        e = raw[mod(j + 1)];
+      const rx = b.x - a.x,
+        ry = b.y - a.y,
+        sx = e.x - c.x,
+        sy = e.y - c.y;
+      const cross = rx * sy - ry * sx;
+      if (Math.abs(cross) < 1e-9) return null;
+      const t = ((c.x - a.x) * sy - (c.y - a.y) * sx) / cross,
+        u = ((c.x - a.x) * ry - (c.y - a.y) * rx) / cross;
+      if (t < 0 || t > 1 || u < 0 || u > 1) return null;
+      return { x: a.x + rx * t, y: a.y + ry * t };
+    };
+    for (let first = 0; first < count; first++) {
+      if (!folded[first] || folded[mod(first - 1)]) continue;
+      let last = first;
+      while (folded[mod(last + 1)]) last++;
+      // Walk outwards from the loop until the line before it meets the line
+      // after it.
+      let hit: Point | null = null,
+        from = first,
+        to = last + 1;
+      search: for (let reach = 0; reach < 60; reach++)
+        for (let k = 0; k <= reach; k++)
+          for (let m = 0; m <= reach; m++) {
+            if (Math.max(k, m) !== reach) continue;
+            hit = crossing(first - 1 - k, last + 1 + m);
+            if (!hit) continue;
+            from = first - k;
+            to = last + 1 + m;
+            break search;
+          }
+      if (!hit) {
+        const a = raw[mod(first)],
+          b = raw[mod(last + 1)];
+        hit = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+      }
+      for (let i = from; i <= to; i++) line[mod(i)] = { ...hit };
+    }
+    // Loops that overlap can leave a point just past a corner; pull any such
+    // point into the corner.
+    for (let pass = 0, moved = true; moved && pass < 12; pass++) {
+      moved = false;
+      for (let i = 0; i < count; i++) {
+        const a = points[i],
+          b = points[mod(i + 1)],
+          p = line[i],
+          q = line[mod(i + 1)];
+        if ((b.x - a.x) * (q.x - p.x) + (b.y - a.y) * (q.y - p.y) < -1e-6) {
+          line[i] = { ...q };
+          moved = true;
+        }
+      }
+    }
+    return line;
   }
+  const offset = (i: number, d: number) => edge(d)[i];
   // Shared by timing gates, grid paint and physical spawn positions.
   const START = { ...data.start };
   const startDistance = nearest(START).progress;
@@ -215,6 +319,9 @@ export function buildTrack(data: TrackData) {
     wallVertices,
     grandstands: data.grandstands,
     sign: data.sign,
+    theme: data.theme ?? "park",
+    scenery: data.scenery ?? [],
+    trackside: data.trackside ?? false,
     pads,
     /** Bridge layer of each centreline segment (see LAYER). */
     layer,
@@ -253,7 +360,9 @@ function fromTiled(id: string, name: string, map: typeof foundryMap) {
 }
 export const tracks: Record<string, Track> = {
   foundry: fromTiled("foundry", "FOUNDRY CIRCUIT", foundryMap),
-  overpass: buildTrack(overpassData),
+  overpass: buildTrack(overpassData as TrackData),
+  // Traced from a circuit outline; see the anchors in valencia.json.
+  valencia: buildTrack(valenciaData as TrackData),
 };
 export const trackIds = Object.keys(tracks);
 export const defaultTrack = tracks.foundry;
