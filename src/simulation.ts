@@ -50,6 +50,31 @@ export const CATCH_UP = {
   /** Extra pad boost time at full help: 0.6 makes 1 s into 1.6 s. */
   padBoost: 0.6,
 };
+/**
+ * Easy mode (a host option online), for people who do not play many games.
+ * The walls stand at the edge of the road, in front of the sand, and work
+ * like the guard rails in bowling: a kart that reaches one is pushed back
+ * towards the road and turned to face along it, losing a little speed. Karts
+ * are slower and the countdown is longer. (The client also turns the camera
+ * so the kart always drives up the screen; see src/main.ts.)
+ */
+export const EASY = {
+  /** Share of the normal top speed: 70 km/h instead of 80. */
+  speed: 0.836,
+  countdown: 6,
+  /** A kart is bounced when its body comes this close to the wall. */
+  reach: 2,
+  /** Sideways speed off the rail: this share of the speed it arrived with,
+   * and never less than `push`. */
+  bounce: 0.5,
+  push: 1.3,
+  /** Share of the speed along the road that is kept. */
+  keep: 0.85,
+  /** How far towards the middle of the road the kart is left pointing. */
+  aim: 0.22,
+  /** Share of the turn still to do that is made each step. */
+  turn: 0.2,
+};
 // Collision categories. Where the road crosses itself, karts and walls on
 // the bridge ignore the ones underneath it, and the other way round.
 const WALL = 1,
@@ -98,6 +123,8 @@ export class Kart {
   driftCharge = 0;
   /** Steering direction of the current slide: -1 left, 1 right, 0 none. */
   driftDir = 0;
+  /** Easy mode: turn (radians) a guard rail still has to give this kart. */
+  railTurn = 0;
   /** Centreline segment the kart is on; keeps it on its own stretch of
    * road where the track crosses itself. */
   segment = 0;
@@ -132,11 +159,13 @@ export class Simulation {
     public laps = LAPS,
     /** Give karts behind the leader a little help (see CATCH_UP). */
     public catchUp = false,
+    /** Guard rails and a lower top speed (see EASY). */
+    public easy = false,
   ) {
     const { points, wallVertices, gridPosition } = track;
     for (let side of [-1, 1])
       for (let i = 0; i < points.length; i++) {
-        const vertices = wallVertices(i, side);
+        const vertices = wallVertices(i, side, easy ? 0 : undefined);
         const options = {
           isStatic: true,
           friction: 0,
@@ -208,6 +237,7 @@ export class Simulation {
     k.boost = 0;
     k.driftCharge = 0;
     k.driftDir = 0;
+    k.railTurn = 0;
     k.resetCount++;
     // A held kart is ghosted so traffic cannot move it or become blocked by it.
     Matter.Body.setStatic(k.body, true);
@@ -349,7 +379,10 @@ export class Simulation {
         k.input.throttle < 0 && forward > 0.5
           ? tuning.braking
           : tuning.acceleration;
-      const topSpeed = tuning.topSpeed * (1 + CATCH_UP.topSpeed * k.help);
+      const topSpeed =
+        tuning.topSpeed *
+        (this.easy ? EASY.speed : 1) *
+        (1 + CATCH_UP.topSpeed * k.help);
       // Smooth power taper limits engine speed without clamping impact momentum.
       const power =
         k.input.throttle > 0
@@ -415,6 +448,7 @@ export class Simulation {
         b.angularVelocity * (1 - tuning.angularDamping) +
           steering * tuning.angularDamping,
       );
+      if (this.easy) this.guardRail(k);
       const gate = gatePosition(k.nextGate, this.gateCount);
       const crossed =
         k.nextGate === 0
@@ -439,6 +473,48 @@ export class Simulation {
       }
     }
     Matter.Engine.update(this.engine, 1000 / 60);
+  }
+  /** Easy mode's guard rails: a kart that drifts out to the wall is sent
+   * back towards the road and turned to face along it. */
+  guardRail(k: Kart) {
+    const { ROAD, atDistance } = this.track;
+    const b = k.body,
+      n = k.near;
+    // Unit vector out from the centreline, and how far the kart's body
+    // (22 x 14) reaches that way: more nose-on than side-on.
+    const out = {
+      x: (b.position.x - n.point.x) / (n.distance || 1),
+      y: (b.position.y - n.point.y) / (n.distance || 1),
+    };
+    const cos = Math.cos(b.angle),
+      sin = Math.sin(b.angle);
+    const body =
+      Math.abs(cos * out.x + sin * out.y) * 11 +
+      Math.abs(-sin * out.x + cos * out.y) * 7;
+    if (n.distance + body > ROAD / 2 - EASY.reach) {
+      const a = atDistance(n.progress - 8),
+        c = atDistance(n.progress + 8),
+        length = Math.hypot(c.x - a.x, c.y - a.y) || 1;
+      const along = { x: (c.x - a.x) / length, y: (c.y - a.y) / length };
+      const leaving = b.velocity.x * out.x + b.velocity.y * out.y;
+      if (leaving > 0.05) {
+        const speed = b.velocity.x * along.x + b.velocity.y * along.y;
+        const back = Math.max(EASY.push, leaving * EASY.bounce);
+        Matter.Body.setVelocity(b, {
+          x: along.x * speed * EASY.keep - out.x * back,
+          y: along.y * speed * EASY.keep - out.y * back,
+        });
+        // Point the kart down the road, angled a little away from the rail.
+        const side = Math.sign(along.x * out.y - along.y * out.x) || 1;
+        const target = Math.atan2(along.y, along.x) - side * EASY.aim;
+        k.railTurn = angleDiff(target, b.angle);
+      }
+    }
+    if (k.railTurn) {
+      const turn = k.railTurn * EASY.turn;
+      Matter.Body.setAngle(b, b.angle + turn);
+      k.railTurn = Math.abs(k.railTurn - turn) < 0.01 ? 0 : k.railTurn - turn;
+    }
   }
   /** Roughly how far a kart has raced, in px of track. It counts timing
    * gates, so reversing over the start line gains nothing. */

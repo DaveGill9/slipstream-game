@@ -28,6 +28,8 @@ export interface TrackData {
 }
 /** Boost pad size: length along the road and width across it. */
 export const PAD = { length: 30, width: 26 };
+/** Width of the sand between the road edge and the wall. */
+export const WALL_GAP = 22;
 export const angleDiff = (a: number, b: number) =>
   Math.atan2(Math.sin(a - b), Math.cos(a - b));
 // Where one stretch of road passes over another, each stretch is a layer for
@@ -240,13 +242,15 @@ export function buildTrack(data: TrackData) {
     x: START.x - 25 - Math.floor(id / 2) * 38,
     y: START.y + (id % 2 ? 23 : -23),
   });
-  function wallVertices(index: number, side: number) {
+  /** One section of wall. `gap` is the strip of sand between the road
+   * and the wall; easy mode uses 0 (see EASY in simulation.ts). */
+  function wallVertices(index: number, side: number, gap = WALL_GAP) {
     const next = (index + 1) % count;
     return [
-      offset(index, side * (ROAD / 2 + 22)),
-      offset(next, side * (ROAD / 2 + 22)),
-      offset(next, side * (ROAD / 2 + 30)),
-      offset(index, side * (ROAD / 2 + 30)),
+      offset(index, side * (ROAD / 2 + gap)),
+      offset(next, side * (ROAD / 2 + gap)),
+      offset(next, side * (ROAD / 2 + gap + 8)),
+      offset(index, side * (ROAD / 2 + gap + 8)),
     ];
   }
   // Find where the road crosses itself, if it does. The first pass through

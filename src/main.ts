@@ -49,6 +49,7 @@ import {
   defaultTrack,
   LAYER,
   PAD,
+  WALL_GAP,
   type Track,
 } from "./track";
 type Pad = Track["pads"][number];
@@ -65,6 +66,8 @@ function chevron(pad: Pad, along: number) {
     [along + 2, 0],
   ].map(([x, y]) => ({ x: pad.x + x * c - y * s, y: pad.y + x * s + y * c }));
 }
+/** Colours of the striped guard rails of easy mode. */
+const RAIL = ["#f0c94a", "#ece9d8"];
 const CHEVRONS = [-9, -1, 7];
 // Drift spark colours by charge: warming up, small boost, big boost.
 const SPARKS = [0xeef2e6, 0x6cc6ff, 0xffa24a];
@@ -157,6 +160,13 @@ class Race extends Phaser.Scene {
   lastView = -1;
   /** Taps of A / D (or the arrows) not yet used to change who we watch. */
   watchStep = 0;
+  /** Easy mode (online, set by the host): guard rails are painted at the
+   * road edge and the camera turns so the kart always drives up the screen. */
+  easy = false;
+  /** Whether the camera was turning with the kart last frame. */
+  turned = false;
+  /** How far the camera is turned, in radians. */
+  camTurn = 0;
   /** What the race callouts have seen so far (see callouts()). */
   notes = this.freshNotes();
   networkMessage = "";
@@ -252,13 +262,16 @@ class Race extends Phaser.Scene {
   }
   /** Switches circuit: scenery, skid-mark layer, camera limits and a fresh
    * grid of karts. */
-  setTrack(track: Track, force = false) {
-    if (track === this.track && !force) return;
+  setTrack(track: Track, force = false, easy = false) {
+    if (track === this.track && easy === this.easy && !force) return;
     this.track = track;
+    this.easy = easy;
     const { WORLD } = track;
-    if (!this.textures.exists(`track-${track.id}`)) this.makeTrack();
+    // Easy mode has its own picture of each track (walls at the road edge).
+    const key = track.id + (easy ? "-easy" : "");
+    if (!this.textures.exists(`track-${key}`)) this.makeTrack();
     this.trackImage ??= this.add.image(0, 0, "__DEFAULT").setOrigin(0);
-    this.trackImage.setTexture(`track-${track.id}`);
+    this.trackImage.setTexture(`track-${key}`);
     this.marks?.destroy();
     this.marks = this.add
       .renderTexture(0, 0, WORLD.width, WORLD.height)
@@ -268,9 +281,15 @@ class Race extends Phaser.Scene {
     this.deck = undefined;
     if (track.bridge)
       this.deck = this.add
-        .image(track.bridge.x, track.bridge.y, `deck-${track.id}`)
+        .image(track.bridge.x, track.bridge.y, `deck-${key}`)
         .setDepth(7);
-    this.cameras.main.setBounds(0, 0, WORLD.width, WORLD.height);
+    // The turning camera of easy mode shows past the edge of the map, so it
+    // is not held inside it and the surroundings carry on in the same colour.
+    if (easy) this.cameras.main.removeBounds();
+    else this.cameras.main.setBounds(0, 0, WORLD.width, WORLD.height);
+    this.cameras.main.setBackgroundColor(
+      track.theme === "street" ? "#8e908a" : "#6e834c",
+    );
     this.sim?.destroy();
     this.sim = new Simulation(SOLO_KARTS, new Set([0]), track);
     const grid = track.gridPosition(0);
@@ -298,10 +317,15 @@ class Race extends Phaser.Scene {
       c.stroke();
       c.setLineDash([]);
     };
-    stroke(ROAD + 64, "#40574e");
-    stroke(ROAD + 60, "#a9b5a5");
-    stroke(ROAD + 44, "#7d8a80");
-    stroke(ROAD + 16, "#e7e4ca");
+    if (this.easy) {
+      stroke(ROAD + 20, "#40574e");
+      stroke(ROAD + 16, RAIL[0]);
+    } else {
+      stroke(ROAD + 64, "#40574e");
+      stroke(ROAD + 60, "#a9b5a5");
+      stroke(ROAD + 44, "#7d8a80");
+      stroke(ROAD + 16, "#e7e4ca");
+    }
     stroke(ROAD, "#4a5252");
     stroke(1, "#939887", [12, 22]);
   }
@@ -446,8 +470,10 @@ class Race extends Phaser.Scene {
       sign,
       name,
     } = this.track;
+    const easy = this.easy,
+      key = this.track.id + (easy ? "-easy" : "");
     const tex = this.textures.createCanvas(
-      `track-${this.track.id}`,
+      `track-${key}`,
       WORLD.width,
       WORLD.height,
     )!;
@@ -519,18 +545,23 @@ class Race extends Phaser.Scene {
     }
     for (const side of [-1, 1]) {
       for (let i = 0; i < points.length; i++) {
-        const vertices = wallVertices(i, side);
+        const vertices = wallVertices(i, side, easy ? 0 : undefined);
         c.beginPath();
         vertices.forEach((p, j) =>
           j ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y),
         );
         c.closePath();
-        c.fillStyle = street ? "#d0d2ca" : "#a9b5a5";
+        // Guard rails are striped so they stand out from an ordinary wall.
+        c.fillStyle = easy
+          ? RAIL[Math.floor(i / 3) % 2]
+          : street
+            ? "#d0d2ca"
+            : "#a9b5a5";
         c.fill();
       }
       c.beginPath();
       points.forEach((_, i) => {
-        const p = offset(i, side * (ROAD / 2 + 22));
+        const p = offset(i, side * (ROAD / 2 + (easy ? 0 : WALL_GAP)));
         i ? c.lineTo(p.x, p.y) : c.moveTo(p.x, p.y);
       });
       c.closePath();
@@ -668,7 +699,7 @@ class Race extends Phaser.Scene {
       c.restore();
       const size = Math.ceil(half * 2 + ROAD + 80);
       const deck = this.textures.createCanvas(
-        `deck-${this.track.id}`,
+        `deck-${key}`,
         size,
         size,
       )!;
@@ -1170,7 +1201,7 @@ class Race extends Phaser.Scene {
     // On a cup podium the host may already have picked the next track; the
     // scene only changes once that race starts.
     if (state.phase !== "podium" || this.networkRaceId !== state.raceId)
-      this.setTrack(tracks[state.track] ?? defaultTrack);
+      this.setTrack(tracks[state.track] ?? defaultTrack, false, state.easy);
     if (state.phase === "lobby") {
       this.state = "lobby";
       this.input.keyboard!.enabled = false;
@@ -1193,6 +1224,7 @@ class Race extends Phaser.Scene {
         this.track,
         state.laps,
         true,
+        state.easy,
       );
       this.networkRaceId = state.raceId;
       this.watching = -1;
@@ -1239,6 +1271,7 @@ class Race extends Phaser.Scene {
         "boost",
         "driftCharge",
         "driftDir",
+        "railTurn",
         "segment",
       ] as const)
         k[key] = remote[key];
@@ -1333,14 +1366,19 @@ class Race extends Phaser.Scene {
   /** A bright chevron sweeps along each pad, pointing the way. */
   drawPads() {
     const g = this.padShine.clear();
-    const cam = this.cameras.main.worldView;
+    // Anything within the screen's diagonal may be in view, whichever way
+    // the camera is turned.
+    const cam = this.cameras.main,
+      reach = Math.hypot(cam.width, cam.height) / 2 + 40;
     const step = Math.floor(this.time.now / 110) % (CHEVRONS.length + 1);
     for (const pad of this.track.pads) {
-      if (!Phaser.Geom.Rectangle.Contains(cam, pad.x, pad.y)) {
-        const grown = Phaser.Geom.Rectangle.Clone(cam);
-        Phaser.Geom.Rectangle.Inflate(grown, 40, 40);
-        if (!Phaser.Geom.Rectangle.Contains(grown, pad.x, pad.y)) continue;
-      }
+      if (
+        Math.hypot(
+          pad.x - cam.scrollX - cam.width / 2,
+          pad.y - cam.scrollY - cam.height / 2,
+        ) > reach
+      )
+        continue;
       CHEVRONS.forEach((along, i) => {
         const lit = i === step ? 0.95 : i === step - 1 ? 0.45 : 0;
         if (!lit) return;
@@ -1672,28 +1710,44 @@ class Race extends Phaser.Scene {
     const vb = view.body;
     const drawnX = vb.position.x + this.smoothing[view.id].x,
       drawnY = vb.position.y + this.smoothing[view.id].y;
-    const tx =
-        drawnX +
-        Phaser.Math.Clamp(
-          vb.velocity.x * 22,
-          -cam.width * 0.25,
-          cam.width * 0.25,
-        ) -
-        cam.width / 2,
-      ty =
-        drawnY +
-        Phaser.Math.Clamp(
-          vb.velocity.y * 22,
-          -cam.height * 0.25,
-          cam.height * 0.25,
-        ) -
-        cam.height / 2;
+    // Easy mode: the camera turns with the kart, so the kart always points
+    // up the screen and left / right always mean what they look like.
+    const turned =
+      this.easy &&
+      !!this.online &&
+      (racingNow || this.state === "countdown");
+    const heading = vb.angle + this.smoothing[view.id].a;
+    const tx = turned
+        ? // The kart sits below the middle, with more road in view ahead.
+          drawnX + Math.cos(heading) * cam.height * 0.2 - cam.width / 2
+        : drawnX +
+          Phaser.Math.Clamp(
+            vb.velocity.x * 22,
+            -cam.width * 0.25,
+            cam.width * 0.25,
+          ) -
+          cam.width / 2,
+      ty = turned
+        ? drawnY + Math.sin(heading) * cam.height * 0.2 - cam.height / 2
+        : drawnY +
+          Phaser.Math.Clamp(
+            vb.velocity.y * 22,
+            -cam.height * 0.25,
+            cam.height * 0.25,
+          ) -
+          cam.height / 2;
     // Cut straight to a newly chosen kart instead of panning across the map.
     const blend =
-      view.id === this.lastView
+      view.id === this.lastView && turned === this.turned
         ? 1 - Math.exp(-Math.min(delta, 100) / 160)
         : 1;
     this.lastView = view.id;
+    this.turned = turned;
+    const facing = turned ? -Math.PI / 2 - heading : 0;
+    this.camTurn +=
+      Phaser.Math.Angle.Wrap(facing - this.camTurn) *
+      (blend === 1 ? 1 : 1 - Math.exp(-Math.min(delta, 100) / 110));
+    cam.setRotation(this.camTurn);
     cam.setScroll(
       Math.round(Phaser.Math.Linear(cam.scrollX, tx, blend)),
       Math.round(Phaser.Math.Linear(cam.scrollY, ty, blend)),
@@ -1701,15 +1755,27 @@ class Race extends Phaser.Scene {
     // Name tags (online): HTML over the canvas, placed after the camera
     // has moved so they stay glued to their karts.
     const zoom = this.scale.zoom;
+    const cos = Math.cos(this.camTurn),
+      sin = Math.sin(this.camTurn);
+    /** Where a point of the world is on screen, allowing for the turn. */
+    const onScreen = (x: number, y: number) => {
+      const dx = x - cam.scrollX - cam.width / 2,
+        dy = y - cam.scrollY - cam.height / 2;
+      return {
+        x: cam.width / 2 + dx * cos - dy * sin,
+        y: cam.height / 2 + dx * sin + dy * cos,
+      };
+    };
     hud.tags(
       this.online
         ? this.sim.karts.flatMap((k) => {
             const member = this.roomState?.members.find((m) => m.kart === k.id);
+            const at = onScreen(this.sprites[k.id].x, this.sprites[k.id].y);
             return member
               ? [
                   {
-                    x: (this.sprites[k.id].x - cam.scrollX) * zoom,
-                    y: (this.sprites[k.id].y - cam.scrollY - 15) * zoom,
+                    x: at.x * zoom,
+                    y: (at.y - 15) * zoom,
                     text: member.name + (member.connected ? "" : " (OFFLINE)"),
                     me: k.id === this.playerId,
                   },

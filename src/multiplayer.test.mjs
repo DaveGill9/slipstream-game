@@ -278,3 +278,24 @@ test("two real WebSocket clients join, ready and receive the same countdown", as
     await server.close();
   }
 });
+test("easy mode is the host's choice in the lobby: guard rails and a six second countdown", () => {
+  const { room, a, b } = setup();
+  assert.equal(room.snapshot().easy, false);
+  assert.throws(() => room.message(b, { type: "easy", easy: true }), /host/);
+  room.message(a, { type: "easy", easy: true });
+  assert.equal(room.snapshot().easy, true);
+  room.message(a, { type: "ready", ready: true });
+  room.message(b, { type: "ready", ready: true });
+  room.message(a, { type: "start" });
+  assert.equal(room.countdown, 6);
+  assert.equal(room.sim.easy, true);
+  for (let i = 0; i < 200; i++) room.tick();
+  assert.equal(room.phase, "countdown");
+  for (let i = 0; i < 170; i++) room.tick();
+  assert.equal(room.phase, "racing");
+  // Not while a race is on.
+  room.message(a, { type: "easy", easy: false });
+  assert.equal(room.easy, true);
+  assert.equal(typeof room.snapshot().karts[0].railTurn, "number");
+  room.destroy();
+});

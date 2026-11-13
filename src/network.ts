@@ -22,6 +22,7 @@ export interface NetKart {
   boost: number;
   driftCharge: number;
   driftDir: number;
+  railTurn: number;
   segment: number;
   input: Input;
 }
@@ -70,6 +71,8 @@ export interface RoomState {
   round: number;
   /** Winner of the last finished championship, or "". */
   champion: string;
+  /** Easy mode is on (see EASY in simulation.ts). */
+  easy: boolean;
   members: Member[];
   karts: NetKart[];
   order: number[];
@@ -446,6 +449,15 @@ export class RoomPanel {
       ]),
       String(state.series),
       (series) => this.client.send({ type: "series", series: Number(series) }),
+    );
+    setting(
+      "DIFFICULTY",
+      [
+        ["0", "NORMAL"],
+        ["1", "EASY - GUARD RAILS"],
+      ],
+      state.easy ? "1" : "0",
+      (easy) => this.client.send({ type: "easy", easy: easy === "1" }),
     );
     // Once points are on the board the list is the room leaderboard.
     const scored = state.members.some((m) => m.points > 0);

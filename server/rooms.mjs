@@ -8,6 +8,7 @@ import {
   WIN_POINTS,
   FASTEST_LAP_POINTS,
   SERIES,
+  EASY,
 } from "../src/simulation.ts";
 import { tracks, defaultTrack } from "../src/track.ts";
 const idle = () => ({ throttle: 0, steer: 0, drift: false });
@@ -32,6 +33,8 @@ export class Room {
     this.series = 0;
     this.round = 0;
     this.champion = "";
+    // Easy mode: guard rails, slower karts, longer countdown (see EASY).
+    this.easy = false;
   }
   join(name, token, send) {
     const returning = this.members.find((m) => m.token === token && token);
@@ -132,6 +135,7 @@ export class Room {
       tracks[this.track],
       this.laps,
       true,
+      this.easy,
     );
     this.members.forEach((p, i) => {
       p.kart = i;
@@ -141,7 +145,7 @@ export class Room {
       p.absent = 0;
     });
     this.phase = "countdown";
-    this.countdown = 3;
+    this.countdown = this.easy ? EASY.countdown : 3;
     this.raceId++;
     this.endAt = Infinity;
     this.results = null;
@@ -175,6 +179,12 @@ export class Room {
       )
         return;
       this.laps = laps;
+      this.broadcast();
+    } else if (data.type === "easy") {
+      if (m.id !== this.hostId)
+        throw Error("Only the room host picks the difficulty.");
+      if (this.phase !== "lobby") return;
+      this.easy = data.easy === true;
       this.broadcast();
     } else if (data.type === "series") {
       if (m.id !== this.hostId)
@@ -332,6 +342,7 @@ export class Room {
       series: this.series,
       round: this.round,
       champion: this.champion,
+      easy: this.easy,
       members: this.members.map(
         ({ id, name, kart, ready, connected, dnf, seq, points }) => ({
           id,
@@ -368,6 +379,7 @@ export class Room {
           boost: round(k.boost, 1000),
           driftCharge: round(k.driftCharge, 1000),
           driftDir: k.driftDir,
+          railTurn: round(k.railTurn, 1000),
           segment: k.segment,
           input: k.input,
         })) || [],

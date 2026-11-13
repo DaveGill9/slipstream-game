@@ -377,3 +377,43 @@ test("holding a slide charges a drift boost that fires on release", () => {
   assert.equal(k.driftCharge, 0);
   s.destroy();
 });
+test("easy mode: walls stand at the road edge, guard rails steer a kart that never does, and top speed is 70 km/h", () => {
+  for (const track of Object.values(tracks)) {
+    // The rail's inner face is the edge of the road, not beyond the sand.
+    const face = track.wallVertices(0, 1, 0)[0],
+      normal = track.wallVertices(0, 1)[0];
+    assert.ok(Math.abs(track.nearest(face).distance - track.ROAD / 2) < 0.5);
+    assert.ok(track.nearest(normal).distance > track.ROAD / 2 + 20);
+    // No boost pads here, so the speed is the engine alone.
+    const s = new Simulation(
+        1,
+        new Set([0]),
+        { ...track, pads: [] },
+        3,
+        false,
+        true,
+      ),
+      k = s.karts[0];
+    let top = 0,
+      outside = -Infinity;
+    for (let i = 0; i < 60 * 60; i++) {
+      s.step({ throttle: 1, steer: 0, drift: false });
+      top = Math.max(top, k.body.speed * 13);
+      outside = Math.max(outside, k.near.distance - track.ROAD / 2);
+    }
+    assert.ok(outside < 0, `${track.id}: the kart never leaves the road`);
+    assert.ok(k.gates >= 24, `${track.id}: holding the throttle laps the track`);
+    assert.ok(top > 69 && top < 70.5, `${track.id}: top speed ${top}`);
+    s.destroy();
+  }
+  // Without easy mode the same kart ends up in the sand.
+  const s = new Simulation(1, new Set([0]), tracks.foundry, 3),
+    k = s.karts[0];
+  let outside = -Infinity;
+  for (let i = 0; i < 60 * 20; i++) {
+    s.step({ throttle: 1, steer: 0, drift: false });
+    outside = Math.max(outside, k.near.distance - tracks.foundry.ROAD / 2);
+  }
+  assert.ok(outside > 0);
+  s.destroy();
+});
